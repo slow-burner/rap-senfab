@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "installedAt": "2026-10-20T23:58:44.561Z",
+  "files": {
+    "/home/user/rap-senfab/.claude/settings.json": {
+      "plugins": [
+        "ruflo-mods@ruflo",
+        "ruflo-swarm@ruflo",
+        "ruflo-console@ruflo"
+      ],
+      "marketplace": true,
+      "env": true,
+      "claudeInstalled": [
+        "ruflo-mods@ruflo",
+        "ruflo-swarm@ruflo",
+        "ruflo-console@ruflo"
+      ]
+    }
+  }
+}
