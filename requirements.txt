@@ -3,9 +3,12 @@ pandas
 plotly
 openpyxl
 
-# DB 드라이버 — thin 모드라 Oracle 클라이언트 설치가 필요 없다.
-# 구버전 환경이면 cx_Oracle 로 떨어진다 (data_source._connect 참고).
-oracledb
+# DB 드라이버
+pymysql
+
+# bigdataquery(bdq) 는 사내 패키지라 공개 저장소에 없다.
+# 사내 인덱스나 사내 배포본으로 설치한다.
+# bigdataquery
 
 # 검증용 (운영에는 필요 없다)
 # pytest

@@ -68,7 +68,7 @@ data_source.py             조회 계층 (USE_SAMPLE 스위치 · SQL 실행 · 
 capa_config.py             임계값 · CAPA · 계산식 · 코드값 매핑  ← 숫자는 전부 여기만 고친다
 sql/precheck_tkin_view.sql 실제 조회 SQL (프로그램이 이 파일을 그대로 읽어 쓴다)
 tests/test_app.py          화면 전수 검증 (pytest)
-tests/test_sql_mapping.py  SQL 출력 → 화면 컬럼 매핑 검증 (DuckDB, Oracle 불필요)
+tests/test_sql_mapping.py  SQL 출력 → 화면 컬럼 매핑 검증 (DuckDB, 사내 DB 불필요)
 run_app.py                 exe 진입점
 build.bat                  PyInstaller --onedir 빌드
 config.ini.sample          DB 접속 정보 서식 (config.ini 로 복사해서 쓴다)
@@ -90,7 +90,7 @@ pytest -q tests/
 - `tests/test_app.py` — 기간 4종 × EQP 2종 × 14개 화면, 임계치 변경, 필터로 결과가
   0건이 되는 경우, 상단 탭 실제 클릭, 주차 3화면 × 기간 3 × 지표 3, 세 화면 합계 일치.
 - `tests/test_sql_mapping.py` — `sql/precheck_tkin_view.sql` 을 DuckDB 로 실행해
-  `data_source._map_db` 에 통과시킨다. **사내 Oracle 없이 배선을 검증한다.**
+  `data_source._map_db` 에 통과시킨다. **사내 DB 없이 배선을 검증한다.**
   SQL 의 출력 컬럼을 바꿨는데 매핑을 안 고치면 여기서 걸린다.
 
 AppTest 는 레이아웃을 못 본다. 글자가 잘리거나 그래프가 겹치는 것은 headless 로 띄워
@@ -103,13 +103,19 @@ AppTest 는 레이아웃을 못 본다. 글자가 잘리거나 그래프가 겹�
 USE_SAMPLE = False
 ```
 
-`config.ini` 에 `[oracle]` 섹션(host / port / service_name / user / password)을 채운다.
-`oracledb` thin 모드를 먼저 쓰므로 **Oracle 클라이언트 설치는 필요 없다.**
-없으면 `cx_Oracle` 로 떨어진다.
+`config.ini` 에 `[mysql]` 섹션(host / port / user / password / database)을 채운다.
+**port 는 반드시 int 로 변환한다** (`data_source._connect`).
 
 SQL 은 `sql/precheck_tkin_view.sql` 하나뿐이다. 프로그램이 그 파일을 그대로 읽어
 `:d_from` / `:d_to` 바인드로 실행하므로, 수작업 조회와 프로그램이 갈라지지 않는다.
-SQL 툴에서 직접 돌릴 때는 그 두 개를 날짜 리터럴로 바꾸면 된다.
+pymysql 은 `%(name)s` 형태를 쓰므로 `data_source._to_pymysql` 이 변환한다.
+SQL 툴에서 직접 돌릴 때는 `:d_from` / `:d_to` 를 날짜 리터럴로 바꾸면 된다.
+
+**MySQL 8 이상이 필요하다.** CTE 와 `ROW_NUMBER()` 를 쓰므로 5.7 에서는 안 돈다.
+
+`fab.*` 테이블을 MySQL 이 아니라 사내 **bigdataquery(bdq)** 로 읽어야 하면
+`data_source._db()` 만 바꾼다. 그 위 주석에 교체용 코드를 적어 뒀고,
+`_map_db` 이후는 그대로 쓴다.
 
 ### 쓰는 테이블
 
@@ -155,7 +161,8 @@ SQL 툴에서 직접 돌릴 때는 그 두 개를 날짜 리터럴로 바꾸면 
 ```
 pyinstaller run_app.py --name precheck_monitor --onedir --noconfirm ^
   --collect-all streamlit --copy-metadata streamlit --collect-all plotly ^
-  --hidden-import openpyxl --hidden-import oracledb ^
+  --hidden-import openpyxl --hidden-import pymysql ^
+  --collect-all bigdataquery ^
   --add-data "app.py;." --add-data "data_source.py;." ^
   --add-data "capa_config.py;." --add-data "sql;sql" ^
   --add-data ".streamlit;.streamlit"
@@ -164,6 +171,7 @@ pyinstaller run_app.py --name precheck_monitor --onedir --noconfirm ^
 `--add-data "sql;sql"` 을 빼면 안 된다. `data_source` 가 실행 중에
 `sql/precheck_tkin_view.sql` 을 읽기 때문에, 빠지면 DB 모드에서 바로 죽는다.
 `--copy-metadata streamlit` 도 필수다. 없으면 실행 시 `importlib.metadata` 에서 죽는다.
+`bigdataquery` 는 사내 패키지라 공개 저장소에 없다. 사내 인덱스로 설치한다.
 
 결과는 `dist/precheck_monitor/precheck_monitor.exe`.
 

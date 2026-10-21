@@ -44,11 +44,10 @@ def _run_sql():
     """실제 SQL 을 DuckDB 로 실행해 결과 DataFrame 을 돌려준다."""
     sql = ds._sql_text()
     # Oracle 전용 표현만 치환한다. 조인·계산 로직은 그대로 둔다.
-    sql = sql.replace(":d_from - 8", "TIMESTAMP '2026-10-12 00:00:00'")
-    sql = sql.replace(":d_to - 28", "TIMESTAMP '2026-09-22 00:00:00'")
+    sql = sql.replace("DATE_SUB(:d_from, INTERVAL 8 DAY)", "TIMESTAMP '2026-10-12 00:00:00'")
+    sql = sql.replace("DATE_SUB(:d_to, INTERVAL 28 DAY)", "TIMESTAMP '2026-09-22 00:00:00'")
     sql = sql.replace(":d_from", "TIMESTAMP '2026-10-20 00:00:00'")
     sql = sql.replace(":d_to", "TIMESTAMP '2026-10-21 00:00:00'")
-    sql = sql.replace("NULLS LAST", "")
     sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.S)
     sql = re.sub(r"--[^\n]*", "", sql)
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 import configparser
 import os
 import random
+import re
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -180,6 +181,15 @@ def _sample(d_from: date, d_to: date) -> pd.DataFrame:
 # ------------------------------------------------------------- 실제 DB 연결
 SQL_FILE = "sql/precheck_tkin_view.sql"
 
+# fab.* 테이블을 MySQL 이 아니라 사내 bigdataquery(bdq) 로 읽어야 한다면
+# _db() 를 아래처럼 바꾼다. 나머지(_map_db 이후)는 그대로 쓴다.
+#
+#   from bigdataquery import bdq
+#   def _db(d_from, d_to):
+#       sql = _sql_text().replace(":d_from", f"'{d_from}'") \
+#                        .replace(":d_to",   f"'{d_to + timedelta(days=1)}'")
+#       return bdq.query(sql)
+
 # SQL 출력 컬럼 -> 화면이 쓰는 컬럼 (COLUMNS)
 # 왼쪽을 바꾸려면 sql/precheck_tkin_view.sql 의 마지막 SELECT 도 같이 본다.
 SQL_TO_APP = {
@@ -230,15 +240,34 @@ def _sql_text() -> str:
 
 
 def _connect():
-    """config.ini 의 [oracle] 로 접속한다. 드라이버는 oracledb 를 먼저 본다."""
-    sec = _cfg()["oracle"]
-    try:
-        import oracledb as drv            # thin 모드. 클라이언트 설치 불필요
-    except ImportError:                    # 구버전 환경
-        import cx_Oracle as drv            # type: ignore
-    dsn = sec.get("dsn") or drv.makedsn(
-        sec["host"], int(sec["port"]), service_name=sec["service_name"])
-    return drv.connect(user=sec["user"], password=sec["password"], dsn=dsn)
+    """config.ini 의 [mysql] 로 접속한다."""
+    import pymysql  # exe 빌드 때 포함되도록 여기서 import
+
+    sec = _cfg()["mysql"]
+    return pymysql.connect(
+        host=sec["host"],
+        port=int(sec["port"]),            # port 는 반드시 int 변환
+        user=sec["user"],
+        password=sec["password"],
+        database=sec["database"],
+        charset="utf8mb4",
+    )
+
+
+_BIND = re.compile(r":(\w+)")
+
+
+def _to_pymysql(sql: str) -> str:
+    """:d_from 바인드를 pymysql 이 쓰는 %(d_from)s 로 바꾼다.
+
+    .sql 파일은 SQL 툴에서 그대로 돌릴 수 있게 :이름 형태로 둔다.
+    변환 전에 주석을 떼고, 남은 % 를 %% 로 이스케이프한다.
+    순서가 중요하다. % 를 먼저 escape 해야 여기서 만든 %(name)s 가 안 깨진다.
+    """
+    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.S)   # 블록 주석
+    sql = re.sub(r"--[^\n]*", "", sql)                # 줄 주석
+    sql = sql.replace("%", "%%")                      # 리터럴 % 보호
+    return _BIND.sub(r"%(\1)s", sql)
 
 
 def _db(d_from: date, d_to: date) -> pd.DataFrame:
@@ -246,7 +275,7 @@ def _db(d_from: date, d_to: date) -> pd.DataFrame:
     conn = _connect()
     try:
         return pd.read_sql(
-            _sql_text(), conn,
+            _to_pymysql(_sql_text()), conn,
             params={"d_from": datetime.combine(d_from, datetime.min.time()),
                     "d_to":   datetime.combine(d_to + timedelta(days=1),
                                                datetime.min.time())},

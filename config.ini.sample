@@ -2,11 +2,13 @@
 ; 이 파일을 config.ini 로 복사해 exe 폴더 옆(또는 app.py 옆)에 두고 값을 채운다.
 ; data_source.USE_SAMPLE = False 로 바꾸면 이 값으로 접속한다.
 ; config.ini 는 .gitignore 에 있어 저장소에 올라가지 않는다.
-[oracle]
+[mysql]
 host = 10.0.0.1
-port = 1521
-service_name = METRO
+port = 3306
 user = metro_ro
 password =
-; host/port/service_name 대신 완성된 DSN 을 쓰려면 아래 한 줄만 채운다
-dsn =
+database = fab
+
+[bdq]
+; 사내 bigdataquery 설정이 따로 있으면 여기에 둔다
+cluster =

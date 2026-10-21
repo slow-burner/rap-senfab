@@ -15,7 +15,8 @@ pyinstaller run_app.py ^
   --copy-metadata streamlit ^
   --collect-all plotly ^
   --hidden-import openpyxl ^
-  --hidden-import oracledb ^
+  --collect-all bigdataquery ^
+  --hidden-import pymysql ^
   --add-data "app.py;." ^
   --add-data "data_source.py;." ^
   --add-data "capa_config.py;." ^

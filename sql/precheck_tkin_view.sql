@@ -23,7 +23,8 @@
       뜻이다. SQL 은 NULL 끼리 자동으로 안 맞지만 빈 문자열은 맞으므로,
       오른쪽 키에 NULL/공백 제외 조건을 넣어 동작을 맞춘다.
 
-   DB: Oracle 기준. MySQL 은 파일 맨 아래 주석 참고.
+   DB: MySQL 8 기준 (CTE·윈도우 함수 필요). pymysql 로 실행한다.
+   Oracle 로 옮길 때는 파일 맨 아래 주석 참고.
    ============================================================================ */
 
 WITH
@@ -49,8 +50,8 @@ REQ_BASE AS (
     FROM   fab.m_lot_actv_req AR
     /* 조회 기간. 프로그램이 :d_from / :d_to 를 넘긴다.
        SQL 툴에서 직접 돌릴 때는 아래처럼 날짜 리터럴로 바꿔 쓴다.
-         AR.UPDATE_DATE >= TO_DATE('2026-10-18','YYYY-MM-DD')
-         AR.UPDATE_DATE <  TO_DATE('2026-10-22','YYYY-MM-DD')
+         AR.UPDATE_DATE >= '2026-10-18'
+         AR.UPDATE_DATE <  '2026-10-22'
        Spotfire 의 MANUAL_RESER_24H 와 똑같이 보려면 24시간으로 준다. */
     WHERE  AR.UPDATE_DATE >= :d_from
       AND  AR.UPDATE_DATE <  :d_to
@@ -99,7 +100,8 @@ HIST_RANKED AS (
        ★ TKOUT_DATA IS NULL 을 반드시 같이 둔다. 지금 설비에 들어가 있는
          (= TKIN 했고 아직 TKOUT 안 한) LOT 이 바로 'TKIN 현황' 의 대상인데,
          TKOUT_DATA >= ... 만 쓰면 그 행이 통째로 빠진다. */
-    WHERE  ( H.TKOUT_DATA >= :d_from - 8 OR H.TKOUT_DATA IS NULL )
+    WHERE  ( H.TKOUT_DATA >= DATE_SUB(:d_from, INTERVAL 8 DAY)
+             OR H.TKOUT_DATA IS NULL )
       AND  H.LINE_ID  IN (SELECT DISTINCT LINE_ID FROM REQ_BASE)
       AND  H.LOT_ID   IS NOT NULL            -- 빈 값은 매칭하지 않음
       AND  H.STEP_SEQ IS NOT NULL
@@ -131,7 +133,7 @@ APT AS (
     /* 파티션 키는 AREA 와 OUT_TIME 이다. 둘 다 걸어야 파티션이 잘린다.
        Spotfire 매칭 키에는 AREA 가 없었지만, 빼면 전 라인 파티션을 읽고
        게다가 라인이 섞인 평균이 나온다. AREA = 다른 테이블의 LINE_ID 다. */
-    WHERE  S.OUT_TIME >= :d_to - 28
+    WHERE  S.OUT_TIME >= DATE_SUB(:d_to, INTERVAL 28 DAY)
       AND  S.AREA IN (SELECT DISTINCT LINE_ID FROM REQ_BASE)
       AND  S.PPID        IS NOT NULL
       AND  S.PROCESS_ID  IS NOT NULL
@@ -156,7 +158,7 @@ APT_STEP AS (
         AVG(S.AST_TIME) AS AVG_APT_STEP,
         COUNT(*)        AS APT_STEP_N
     FROM   fab.m_lot_spx S
-    WHERE  S.OUT_TIME >= :d_to - 28
+    WHERE  S.OUT_TIME >= DATE_SUB(:d_to, INTERVAL 28 DAY)
       AND  S.AREA IN (SELECT DISTINCT LINE_ID FROM REQ_BASE)
       AND  S.PROCESS_ID  IS NOT NULL
       AND  S.LOCATION_ID IS NOT NULL
@@ -381,11 +383,12 @@ CALC AS (
            Spotfire : [AVG_APT] * (Len([SLOT_ID]) - Len(Substitute([SLOT_ID], ",", "")) + 1)
            [SLOT_ID] 는 m_lot_transn_hist 에서 붙여 온 '실제 트랙인된 슬롯' 이다.
            요청 슬롯(ACTV_SLOT_ID)이 아니다. 둘 다 내보내 비교할 수 있게 둔다. */
-        LENGTH(J.SLOT_ID) - LENGTH(REPLACE(J.SLOT_ID, ',', '')) + 1            AS SLOT_COUNT,
-        J.AVG_APT *
-            ( LENGTH(J.SLOT_ID) - LENGTH(REPLACE(J.SLOT_ID, ',', '')) + 1 )    AS FORECAST_APT,
+        LENGTH(NULLIF(J.SLOT_ID, '')) 
+            - LENGTH(REPLACE(NULLIF(J.SLOT_ID, ''), ',', '')) + 1              AS SLOT_COUNT,
+        J.AVG_APT * ( LENGTH(NULLIF(J.SLOT_ID, ''))
+            - LENGTH(REPLACE(NULLIF(J.SLOT_ID, ''), ',', '')) + 1 )            AS FORECAST_APT,
 
-        CASE WHEN J.ACTV_SLOT_ID IS NULL THEN 0
+        CASE WHEN NULLIF(J.ACTV_SLOT_ID, '') IS NULL THEN 0
              ELSE LENGTH(J.ACTV_SLOT_ID)
                   - LENGTH(REPLACE(J.ACTV_SLOT_ID, ',', '')) + 1
         END                                                                    AS REQ_SLOT_COUNT,
@@ -402,7 +405,7 @@ CALC AS (
              ELSE 'ST 미등록'
         END                                                                    AS ST_SOURCE,
         COALESCE(J.AVG_APT, J.AVG_APT_STEP) *
-            CASE WHEN J.ACTV_SLOT_ID IS NULL THEN 0
+            CASE WHEN NULLIF(J.ACTV_SLOT_ID, '') IS NULL THEN 0
                  ELSE LENGTH(J.ACTV_SLOT_ID)
                       - LENGTH(REPLACE(J.ACTV_SLOT_ID, ',', '')) + 1
             END                                                                AS FORECAST_APT_REQ,
@@ -505,7 +508,7 @@ FROM   CALC
 WHERE  계측유무 IN ('TKIN 현황', '대기 현황')
   -- AND  계측유무 = 'TKIN 현황'
   -- AND  측정상태 = '측정중'
-ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
+ORDER BY (FORECAST_APT IS NULL), FORECAST_APT DESC, TKIN_DATE DESC;
 
 
 /* ============================================================================
@@ -540,13 +543,13 @@ ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
        그 라인에 그 PPID 실적이 없다는 뜻이고 ST_SOURCE 로 확인된다
      - 설비에 올라가 있는 LOT 이 안 보인다 → TKOUT_DATA IS NULL 조건이 빠졌다
    ----------------------------------------------------------------------------
-   MySQL 로 옮길 때
-     SYSDATE - 1        →  NOW() - INTERVAL 1 DAY
-     SYSDATE - 8        →  NOW() - INTERVAL 8 DAY
-     SYSDATE - 28       →  NOW() - INTERVAL 28 DAY
-     SUBSTR(x, 1, 1)    →  SUBSTRING(x, 1, 1)
-     CAST(NULL AS VARCHAR2(20)) → CAST(NULL AS CHAR(20))
-     ORDER BY ... NULLS LAST    →  ORDER BY (FORECAST_APT IS NULL), FORECAST_APT DESC
-     ※ Oracle 은 빈 문자열이 NULL 이지만 MySQL 은 아니다. MySQL 이면
-       SLOT_COUNT 계산을 NULLIF(SLOT_ID,'') 로 감싸야 빈 값이 1로 세지 않는다.
+   이 쿼리가 쓰는 MySQL 문법 (Oracle 로 옮길 때 바꿀 곳)
+     DATE_SUB(x, INTERVAL n DAY)      →  x - n
+     ORDER BY (col IS NULL), col DESC →  ORDER BY col DESC NULLS LAST
+     NULLIF(SLOT_ID, '')              →  Oracle 은 빈 문자열이 곧 NULL 이라 불필요
+     ※ MySQL 은 빈 문자열이 NULL 이 아니다. NULLIF 를 빼면 슬롯이 빈 행이
+       0매가 아니라 1매로 세져 총측정시간이 부풀려진다.
+     ※ CTE 와 ROW_NUMBER() 를 쓰므로 MySQL 5.7 에서는 돌지 않는다. 8.0 이상 필요.
+     ※ 프로그램은 :d_from / :d_to 를 pymysql 용 %(name)s 로 바꿔 넘긴다
+       (data_source._to_pymysql). SQL 툴에서 직접 돌릴 때는 날짜 리터럴로 바꾼다.
    ============================================================================ */
