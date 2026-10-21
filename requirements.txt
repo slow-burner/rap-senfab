@@ -1,15 +1,61 @@
-streamlit>=1.37
-pandas
-plotly
-openpyxl
+# ============================================================================
+#  계측 사전 지정 부하 모니터 — 설치 라이브러리
+#
+#  설치:  pip install -r requirements.txt
+#  폐쇄망: requirements-lock.txt 를 쓴다 (의존성까지 전부 고정한 목록)
+#  Python 3.11 이상 (아래 버전 조합은 Python 3.13.16 에서 검증했다)
+#  DB:    MySQL 8.0 이상  (CTE 와 ROW_NUMBER() 를 쓴다. 5.7 에서는 안 돈다)
+#
+#  == 버전을 고정한 이유 ==
+#  사내 PC 마다 다른 버전이 깔리면 "제 PC 에서는 되는데요" 가 반복된다.
+#  아래는 전부 검증을 통과한 조합이다. 사내 사정으로 못 맞추는 것이 있으면
+#  각 줄의 '최소' 주석을 보고 그 이상으로만 맞춘다.
+# ============================================================================
 
-# DB 드라이버
-pymysql
+# ---------------------------------------------------------------- 운영 필수
+streamlit==1.66.0
+# 최소 1.37. segmented_control(1.40), container(key=)(1.38) 을 쓴다.
 
-# bigdataquery(bdq) 는 사내 패키지라 공개 저장소에 없다.
-# 사내 인덱스나 사내 배포본으로 설치한다.
+pandas==3.0.5
+# 최소 2.2. Styler.map(2.1), groupby.apply(include_groups=)(2.2) 를 쓴다.
+# 2.0 이하는 applymap 이름이 달라 화면이 죽는다.
+
+plotly==7.1.0
+# 최소 5.15. px.bar 의 facet_row_spacing 과 custom_data 를 쓴다.
+
+pymysql==1.2.3
+# 사내 MySQL 접속 드라이버. data_source._connect() 에서 쓴다.
+
+openpyxl==3.1.5
+# 엑셀 내려받기. 코드가 직접 import 하지는 않지만
+# pd.ExcelWriter(engine="openpyxl") 이 없으면 다운로드 버튼이 전부 죽는다.
+
+Jinja2==3.1.6
+# pandas Styler(df.style.apply) 가 내부에서 쓴다. pandas 가 자동으로 깔지
+# 않는 선택 의존성이라 빼먹기 쉽다. 없으면 LOT 상세 화면에서 ImportError.
+
+# ------------------------------------------- 운영 필수 (위 패키지가 끌고 온다)
+# 명시해 두는 이유: 사내 폐쇄망 인덱스에 미리 올려 둘 목록이 필요하다.
+numpy==2.5.3            # pandas 연산
+pyarrow==26.0.0         # streamlit 의 st.dataframe 전송
+altair==6.3.0           # streamlit 내부 차트
+narwhals==2.27.1        # plotly / altair 의 데이터프레임 추상화
+et-xmlfile==2.0.0       # openpyxl
+packaging==26.3         # streamlit
+
+# ------------------------------------------------------------- 사내 패키지
+# bigdataquery (bdq) — 공개 저장소에 없다. 사내 인덱스나 배포본으로 설치한다.
+# fab.* 를 MySQL 이 아니라 bdq 로 읽을 때만 필요하다 (data_source._db 주석 참고).
 # bigdataquery
 
-# 검증용 (운영에는 필요 없다)
-# pytest
-# duckdb
+# --------------------------------------------------------------- 검증용
+# 운영 PC 에는 필요 없다. 코드를 고칠 때만 설치한다.
+pytest==9.1.1
+duckdb==1.5.6
+# duckdb 는 tests/test_sql_mapping.py 가 쓴다. 사내 DB 없이
+# sql/precheck_tkin_view.sql 을 실행해 화면 컬럼 매핑을 검증한다.
+
+# ------------------------------------------------------------- exe 빌드용
+# 개인 PC 배포본(.exe)을 만들 때만 설치한다.
+# ★ 이 환경에서는 검증하지 않았다. 빌드 PC 에서 한 번 맞춰 보고 버전을 적을 것.
+# pyinstaller>=6.0

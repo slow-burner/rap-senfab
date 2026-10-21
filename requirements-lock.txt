@@ -1,0 +1,61 @@
+# ============================================================================
+#  계측 사전 지정 부하 모니터 — 전체 고정 목록 (의존성 포함)
+#
+#  requirements.txt 는 사람이 읽는 목록이고, 이 파일은 설치용 전체 목록이다.
+#  사내 폐쇄망처럼 공개 인덱스를 못 쓰는 환경에서 휠을 미리 받아 둘 때 쓴다.
+#
+#    pip install -r requirements-lock.txt
+#    # 휠만 미리 받아 두려면
+#    pip download -r requirements-lock.txt -d wheels
+#    pip install --no-index --find-links wheels -r requirements-lock.txt
+#
+#  이 목록은 깨끗한 venv 에 requirements.txt 를 설치한 뒤 그대로 뽑은 것이고,
+#  그 환경에서 pytest 174건 통과와 앱 기동을 확인했다.
+#  Python 3.13.16 기준. 다른 파이썬 버전에서는 일부 패키지가 달라질 수 있다.
+#
+#  bigdataquery(bdq)는 사내 패키지라 여기에 없다. 사내 배포본으로 따로 설치한다.
+#  pyinstaller 도 없다. exe 빌드 PC 에서만 설치한다.
+# ============================================================================
+altair==6.3.0
+anyio==4.15.1
+attrs==26.1.0
+certifi==2026.10.19
+charset-normalizer==3.5.2
+click==8.5.0
+duckdb==1.5.6
+et_xmlfile==2.0.0
+h11==0.16.0
+idna==3.20
+iniconfig==2.3.1
+itsdangerous==2.2.0
+Jinja2==3.1.6
+jsonschema-specifications==2025.9.1
+jsonschema==4.26.0
+MarkupSafe==3.0.4
+narwhals==2.27.1
+numpy==2.5.3
+openpyxl==3.1.5
+packaging==26.3
+pandas==3.0.5
+pillow==12.3.0
+plotly==7.1.0
+pluggy==1.7.0
+protobuf==7.36.2
+pyarrow==26.0.0
+pydeck==0.9.3
+Pygments==2.21.0
+PyMySQL==1.2.3
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+python-multipart==0.0.32
+referencing==0.37.0
+requests==2.34.2
+rpds-py==2026.9.1
+six==1.17.0
+starlette==1.9.0
+streamlit==1.66.0
+typing_extensions==4.16.0
+urllib3==2.8.0
+uvicorn==0.54.0
+watchdog==6.0.0
+websockets==17.3

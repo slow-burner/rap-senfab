@@ -14,6 +14,14 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+사내 폐쇄망이라 공개 인덱스를 못 쓰면 `requirements-lock.txt` 를 쓴다.
+의존성까지 44개를 전부 고정해 둔 목록이다.
+
+```bash
+pip download -r requirements-lock.txt -d wheels          # 인터넷 되는 PC 에서
+pip install --no-index --find-links wheels -r requirements-lock.txt
+```
+
 브라우저가 `http://localhost:8501` 을 연다. `data_source.USE_SAMPLE = True` 라
 **DB 없이 샘플 데이터로 바로 돈다.** 화면과 계산을 확인하는 용도다.
 
@@ -81,7 +89,6 @@ config.ini.sample          DB 접속 정보 서식 (config.ini 로 복사해서 
 ## 검증
 
 ```bash
-pip install pytest duckdb
 pytest -q tests/
 ```
 
