@@ -67,6 +67,7 @@ HIST_RANKED AS (
         H.PPID,
         H.PROCESS_EQP_ID,
         H.TKIN_DATE,
+        H.TKOUT_DATA,                   -- 트랙아웃. 파티션 키
         H.PROCESS_START_DATE,
         H.SLOT_ID,
         H.EQP_TYPE,
@@ -81,7 +82,13 @@ HIST_RANKED AS (
                          H.LAST_UPDATE_DATE   DESC
         ) AS RN
     FROM   fab.m_lot_transn_hist H
-    WHERE  H.TKIN_DATE >= SYSDATE - 8        -- 성능. 기간 없으면 팹 전체 이력을 정렬한다
+    /* 파티션 키는 LINE_ID 와 TKOUT_DATA 다. 둘 다 걸어야 파티션이 잘린다.
+       TKIN_DATE 로 거르면 파티션 가지치기가 안 돼 팹 전체 이력을 읽는다.
+       ★ TKOUT_DATA IS NULL 을 반드시 같이 둔다. 지금 설비에 들어가 있는
+         (= TKIN 했고 아직 TKOUT 안 한) LOT 이 바로 'TKIN 현황' 의 대상인데,
+         TKOUT_DATA >= ... 만 쓰면 그 행이 통째로 빠진다. */
+    WHERE  ( H.TKOUT_DATA >= SYSDATE - 8 OR H.TKOUT_DATA IS NULL )
+      AND  H.LINE_ID  IN (SELECT DISTINCT LINE_ID FROM REQ_BASE)
       AND  H.LOT_ID   IS NOT NULL            -- 빈 값은 매칭하지 않음
       AND  H.STEP_SEQ IS NOT NULL
 ),
@@ -184,6 +191,7 @@ JOINED AS (
         H.PPID,
         H.PROCESS_EQP_ID,
         H.TKIN_DATE,
+        H.TKOUT_DATA,
         H.PROCESS_START_DATE,
         H.SLOT_ID,                      -- ★FORECAST_APT 는 이 컬럼을 쓴다
         H.EQP_TYPE,
@@ -261,8 +269,16 @@ CALC AS (
             ELSE J.LINE_ID
         END                                                                    AS LINEP,
 
-        /* 계측유무 — 트랙인 기록 유무. 완료 판정이 아니다. */
-        CASE WHEN J.TKIN_DATE IS NOT NULL THEN 'TKIN 현황' ELSE '대기 현황' END AS 계측유무
+        /* 계측유무 — 트랙인 기록 유무. Spotfire 원본과 같은 기준이다. */
+        CASE WHEN J.TKIN_DATE IS NOT NULL THEN 'TKIN 현황' ELSE '대기 현황' END AS 계측유무,
+
+        /* 측정상태 — TKOUT_DATA 까지 보고 가른다.
+           'TKIN 현황' 안에서도 지금 설비에 올라가 있는 건(측정중)과
+           이미 끝난 건(완료)이 섞이므로, Real time 으로 보려면 측정중만 본다. */
+        CASE WHEN J.TKIN_DATE  IS NULL     THEN '대기'
+             WHEN J.TKOUT_DATA IS NULL     THEN '측정중'
+             ELSE '완료'
+        END                                                                    AS 측정상태
     FROM JOINED J
 )
 
@@ -272,6 +288,7 @@ CALC AS (
    --------------------------------------------------------------------------- */
 SELECT
     계측유무,
+    측정상태,
     PROCESS_EQP_ID,
     ACTV_STEP_SEQ      AS ACTY_STEP_SEQ,
     PROCESS_ID         AS PROC_ID,
@@ -299,10 +316,13 @@ SELECT
     LINE_ID,
     UPDATE_DATE        AS RESERVE_DATE,
     TKIN_DATE,
+    TKOUT_DATA,
     PROCESS_START_DATE,
     LOT_TRANSN_TYPE
 FROM   CALC
 WHERE  계측유무 = 'TKIN 현황'
+  /* 지금 설비에 올라가 있는 건만 보려면 아래 줄의 주석을 푼다 */
+  -- AND  측정상태 = '측정중'
 ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
 
 
@@ -310,8 +330,9 @@ ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
    미확정 1건 — 사내에서 확인한 뒤 이 파일만 고치면 된다
 
    ※ 함께 받은 컬럼 정리표는 사진·메모로 재구성한 자료라 실제 DB 와 다를 수 있다.
-     REQUESTER_ID 와 TO_PROCESS_UNIT 은 정리표에 없었지만 둘 다 실재하는 컬럼으로
-     확인되어 그대로 쓴다. "정리표에 없다"를 "DB 에 없다"로 읽지 말 것.
+     REQUESTER_ID, TO_PROCESS_UNIT, TKOUT_DATA 는 정리표에 없거나 다른 이름으로
+     적혀 있었지만 셋 다 실재하는 컬럼으로 확인되어 그대로 쓴다.
+     "정리표에 없다"를 "DB 에 없다"로 읽지 말 것.
          SELECT * FROM fab.m_lot_actv_req     WHERE ROWNUM <= 5;
          SELECT * FROM fab.m_lot_transn_hist  WHERE ROWNUM <= 5;
    ----------------------------------------------------------------------------
@@ -333,6 +354,9 @@ ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
      - FORECAST_APT 가 비어 있다  → SLOT_ID(트랙인 슬롯)가 NULL. 대기 건은 정상
      - 대기 건이 전부 '비대상'    → Spotfire 원본과 같은 동작. 대상2 주석 참고
      - 행 수가 Spotfire 보다 많다 → single match 축약(HIST/DR/EMP)이 빠졌는지 확인
+     - 조회가 느리다 → m_lot_transn_hist 는 LINE_ID + TKOUT_DATA 가 파티션 키다.
+       둘 다 WHERE 에 있는지, TKIN_DATE 로 거르고 있지 않은지 본다
+     - 설비에 올라가 있는 LOT 이 안 보인다 → TKOUT_DATA IS NULL 조건이 빠졌다
    ----------------------------------------------------------------------------
    MySQL 로 옮길 때
      SYSDATE - 1        →  NOW() - INTERVAL 1 DAY
