@@ -1,0 +1,16 @@
+[theme]
+base = "light"
+primaryColor = "#12a37a"
+backgroundColor = "#eef0f2"
+# 없으면 흰 사이드바에서 선택칸이 안 보인다
+secondaryBackgroundColor = "#f3f6f5"
+textColor = "#26332f"
+
+[client]
+toolbarMode = "viewer"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
