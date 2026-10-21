@@ -73,6 +73,7 @@ HIST_RANKED AS (
         H.STEP_ID,
         H.STEP_DESC,
         H.LOT_TYPE,
+        H.TO_PROCESS_UNIT,              -- LINEP 분류에 쓰는 PROCESS_UNIT
         ROW_NUMBER() OVER (
             PARTITION BY H.LOT_ID, H.STEP_SEQ
             ORDER BY     H.TKIN_DATE          DESC,
@@ -189,14 +190,13 @@ JOINED AS (
         H.STEP_ID,
         H.STEP_DESC,
         H.LOT_TYPE,
+        H.TO_PROCESS_UNIT AS PROCESS_UNIT,   -- Spotfire LINEP 식의 PROCESS_UNIT
 
         A.AVG_APT,
         A.APT_N,
         D.DESIGN_RULE,
         U.EMP_NAME,
-        U.DEPT_NAME,
-
-        CAST(NULL AS VARCHAR2(20)) AS PROCESS_UNIT   -- ★확인 필요. 하단 참고
+        U.DEPT_NAME
     FROM       REQ_BASE R
     LEFT JOIN  HIST H
            ON  R.LOT_ID        = H.LOT_ID
@@ -242,9 +242,11 @@ CALC AS (
         END                                                                    AS REQ_SLOT_COUNT,
 
         /* 8. LINEP
+           PROCESS_UNIT = m_lot_transn_hist.TO_PROCESS_UNIT.
            PROCESS_UNIT 조건이 먼저 걸리고, 안 맞으면 DESIGN_RULE 첫 글자,
-           그래도 안 맞으면 LINE_ID 그대로. PROCESS_UNIT 이 NULL 이어도
-           아래 단계로 흘러가므로 쿼리는 깨지지 않는다. */
+           그래도 안 맞으면 LINE_ID 그대로.
+           트랙인 이력이 없는 대기 건은 PROCESS_UNIT 이 NULL 이라
+           PFE1/PFE2/PFE3/KFE6/KFE7 로는 안 가고 아래 단계로 흘러간다. */
         CASE
             WHEN J.LINE_ID = 'PFBP' AND J.PROCESS_UNIT = 'PUP' THEN 'PFE1'
             WHEN J.LINE_ID = 'PFBB' AND J.PROCESS_UNIT = 'PUB' THEN 'PFE2'
@@ -305,20 +307,15 @@ ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
 
 
 /* ============================================================================
-   미확정 2건 — 사내에서 확인한 뒤 이 파일만 고치면 된다
+   미확정 1건 — 사내에서 확인한 뒤 이 파일만 고치면 된다
 
    ※ 함께 받은 컬럼 정리표는 사진·메모로 재구성한 자료라 실제 DB 와 다를 수 있다.
-     REQUESTER_ID 는 정리표에 없었지만 실재하는 컬럼으로 확인되어 그대로 쓴다.
-     "정리표에 없다"를 "DB 에 없다"로 읽지 말고 아래로 직접 확인할 것.
-         SELECT * FROM fab.m_lot_actv_req WHERE ROWNUM <= 5;
+     REQUESTER_ID 와 TO_PROCESS_UNIT 은 정리표에 없었지만 둘 다 실재하는 컬럼으로
+     확인되어 그대로 쓴다. "정리표에 없다"를 "DB 에 없다"로 읽지 말 것.
+         SELECT * FROM fab.m_lot_actv_req     WHERE ROWNUM <= 5;
+         SELECT * FROM fab.m_lot_transn_hist  WHERE ROWNUM <= 5;
    ----------------------------------------------------------------------------
-   1) PROCESS_UNIT  (LINEP 분류)
-      PUP / PUB / PUT / PUH / PUJ 값이 어느 테이블 어느 컬럼인지 정리표에 없다.
-      지금은 NULL 로 두어 LINEP 가 DESIGN_RULE·LINE_ID 단계로 흘러간다.
-      즉 PFE1 / PFE2 / PFE3 / KFE6 / KFE7 이 절대 안 나온다.
-      출처를 찾으면 JOINED 의 CAST(NULL ...) AS PROCESS_UNIT 한 줄만 바꾼다.
-
-   2) 라인(AREA) 을 조인 키에 넣을지 — m_lot_spx 와 g_tpss_design_rule_record 둘 다
+   1) 라인(AREA) 을 조인 키에 넣을지 — m_lot_spx 와 g_tpss_design_rule_record 둘 다
       Spotfire 매칭 키를 그대로 옮겼는데, 두 테이블 모두 AREA 가 키의 일부다.
         - m_lot_spx           매칭 PPID + PROCESS_ID + LOCATION_ID  (AREA 없음)
         - g_tpss_design_rule  매칭 PROCESS_ID                        (AREA 없음)
