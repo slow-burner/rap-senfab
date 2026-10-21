@@ -2,4 +2,11 @@ streamlit>=1.37
 pandas
 plotly
 openpyxl
-pymysql
+
+# DB 드라이버 — thin 모드라 Oracle 클라이언트 설치가 필요 없다.
+# 구버전 환경이면 cx_Oracle 로 떨어진다 (data_source._connect 참고).
+oracledb
+
+# 검증용 (운영에는 필요 없다)
+# pytest
+# duckdb
