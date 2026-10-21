@@ -42,20 +42,8 @@ REQ_BASE AS (
         AR.REQUEST_COMMENT,
         AR.ROOM_NAME,
         AR.UPDATE_DATE,
-
-        /* 요청자 사번.
-           컬럼 정리표의 fab.m_lot_actv_req 12개 컬럼에는 REQUESTER_ID 가 없다.
-           Spotfire 정보링크 이름이 ..._RESER_24H 인 점으로 보아 등록자는
-           사전 지정 이력 테이블(REGISTER_ID)에서 오는 것으로 보고 붙인다.
-           m_lot_actv_req 에 요청자 컬럼이 실제로 있으면 이 조인을 지우고
-           AR.<그 컬럼> AS REQUESTER_ID 한 줄로 바꾼다. */
-        RSV.REGISTER_ID AS REQUESTER_ID,
-        RSV.USER_COMMENT
-    FROM       fab.m_lot_actv_req AR
-    LEFT JOIN  mos_kh_smi.smicdc_15_reserve_measure_history RSV
-           ON  AR.LOT_ID        = RSV.LOT_ID
-          AND  AR.PROCESS_ID    = RSV.PROCESS_ID
-          AND  AR.ACTV_STEP_SEQ = RSV.METRO_STEP_SEQ
+        AR.REQUESTER_ID                  -- 요청자 사번. 조인 4의 EMP_NO 와 맞춘다
+    FROM   fab.m_lot_actv_req AR
     WHERE  AR.UPDATE_DATE >= SYSDATE - 1
 ),
 
@@ -187,7 +175,6 @@ JOINED AS (
         R.REQ_STATUS_SEQ,
         R.REQUEST_TYPE,
         R.REQUEST_COMMENT,
-        R.USER_COMMENT,
         R.ROOM_NAME,
         R.UPDATE_DATE,
         R.REQUESTER_ID,
@@ -318,29 +305,20 @@ ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
 
 
 /* ============================================================================
-   미확정 3건 — 사내에서 확인한 뒤 이 파일만 고치면 된다
-   ----------------------------------------------------------------------------
-   1) REQUESTER_ID  — 지금은 reserve 이력에서 끌어오게 해 두었다
-      컬럼 정리표의 fab.m_lot_actv_req 12개 컬럼에 REQUESTER_ID 가 없다.
-      그대로 R.REQUESTER_ID 를 쓰면 ORA-00904 로 바로 죽기 때문에,
-      REQ_BASE 에서 smicdc_15_reserve_measure_history.REGISTER_ID 를
-      LOT_ID + PROCESS_ID + METRO_STEP_SEQ 로 붙여 쓰고 있다.
-      확인할 것
-        (a) 아래로 실제 컬럼을 보고, m_lot_actv_req 에 요청자 컬럼이 있으면
-            그 조인을 지우고 R.<컬럼> AS REQUESTER_ID 로 바꾼다 (훨씬 싸다)
-              SELECT * FROM fab.m_lot_actv_req WHERE ROWNUM <= 5;
-        (b) 두 테이블의 조인 키가 맞는지. 세 키로 1:1 이 아니면 행이 불어난다
-              SELECT COUNT(*), COUNT(DISTINCT LOT_ID||PROCESS_ID||METRO_STEP_SEQ)
-              FROM   mos_kh_smi.smicdc_15_reserve_measure_history
-              WHERE  UPDATE_DATE >= SYSDATE - 1;
+   미확정 2건 — 사내에서 확인한 뒤 이 파일만 고치면 된다
 
-   2) PROCESS_UNIT  (LINEP 분류)
+   ※ 함께 받은 컬럼 정리표는 사진·메모로 재구성한 자료라 실제 DB 와 다를 수 있다.
+     REQUESTER_ID 는 정리표에 없었지만 실재하는 컬럼으로 확인되어 그대로 쓴다.
+     "정리표에 없다"를 "DB 에 없다"로 읽지 말고 아래로 직접 확인할 것.
+         SELECT * FROM fab.m_lot_actv_req WHERE ROWNUM <= 5;
+   ----------------------------------------------------------------------------
+   1) PROCESS_UNIT  (LINEP 분류)
       PUP / PUB / PUT / PUH / PUJ 값이 어느 테이블 어느 컬럼인지 정리표에 없다.
       지금은 NULL 로 두어 LINEP 가 DESIGN_RULE·LINE_ID 단계로 흘러간다.
       즉 PFE1 / PFE2 / PFE3 / KFE6 / KFE7 이 절대 안 나온다.
       출처를 찾으면 JOINED 의 CAST(NULL ...) AS PROCESS_UNIT 한 줄만 바꾼다.
 
-   3) 라인(AREA) 을 조인 키에 넣을지 — m_lot_spx 와 g_tpss_design_rule_record 둘 다
+   2) 라인(AREA) 을 조인 키에 넣을지 — m_lot_spx 와 g_tpss_design_rule_record 둘 다
       Spotfire 매칭 키를 그대로 옮겼는데, 두 테이블 모두 AREA 가 키의 일부다.
         - m_lot_spx           매칭 PPID + PROCESS_ID + LOCATION_ID  (AREA 없음)
         - g_tpss_design_rule  매칭 PROCESS_ID                        (AREA 없음)
