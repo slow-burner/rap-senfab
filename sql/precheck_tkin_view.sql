@@ -77,6 +77,9 @@ HIST_RANKED AS (
         H.STEP_DESC,
         H.LOT_TYPE,
         H.TO_PROCESS_UNIT,              -- LINEP 분류에 쓰는 PROCESS_UNIT
+        /* 같은 LOT·STEP 이력이 여러 건이면 가장 최근 트랙인 1건.
+           LOT_TRANSN_TIME 은 쓰지 않는 컬럼이라 LAST_UPDATE_DATE 를 마지막
+           동점 처리 기준으로 쓴다. */
         ROW_NUMBER() OVER (
             PARTITION BY H.LOT_ID, H.STEP_SEQ
             ORDER BY     H.TKIN_DATE          DESC,
@@ -421,6 +424,10 @@ ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
               m_lot_transn_hist.TO_PROCESS_UNIT (= LINEP 의 PROCESS_UNIT)
               m_lot_transn_hist.TKOUT_DATA (LINE_ID 와 함께 파티션 키)
        없음 : m_lot_actv_req.EQP_TYPE  -> STEP 마스터(m_step)에서 받는다
+       미사용 : m_lot_transn_hist.LOT_TRANSN_TIME
+                처음 받은 SQL 이 ORDER BY 에 썼지만 쓰지 않는 컬럼이다.
+                같은 LOT·STEP 이력이 여러 건일 때 1건을 고르는 기준은
+                TKIN_DATE -> PROCESS_START_DATE -> LAST_UPDATE_DATE 순으로 둔다.
      정리표만 보고 판단하지 말고 아래로 직접 확인할 것.
          SELECT * FROM fab.m_lot_actv_req     WHERE ROWNUM <= 5;
          SELECT * FROM fab.m_lot_transn_hist  WHERE ROWNUM <= 5;
