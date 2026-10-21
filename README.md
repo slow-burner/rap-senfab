@@ -149,11 +149,23 @@ SQL 툴에서 직접 돌릴 때는 그 두 개를 날짜 리터럴로 바꾸면 
 
 ## 개인 PC 배포
 
-파이썬이 없는 PC 에서도 돌게 `build.bat` 으로 묶는다.
+파이썬이 없는 PC 에서도 돌게 PyInstaller `--onedir` 로 묶는다.
+`build.bat` 을 실행하거나, 같은 명령을 직접 친다.
 
 ```
-build.bat   →   dist/precheck_monitor/precheck_monitor.exe
+pyinstaller run_app.py --name precheck_monitor --onedir --noconfirm ^
+  --collect-all streamlit --copy-metadata streamlit --collect-all plotly ^
+  --hidden-import openpyxl --hidden-import oracledb ^
+  --add-data "app.py;." --add-data "data_source.py;." ^
+  --add-data "capa_config.py;." --add-data "sql;sql" ^
+  --add-data ".streamlit;.streamlit"
 ```
+
+`--add-data "sql;sql"` 을 빼면 안 된다. `data_source` 가 실행 중에
+`sql/precheck_tkin_view.sql` 을 읽기 때문에, 빠지면 DB 모드에서 바로 죽는다.
+`--copy-metadata streamlit` 도 필수다. 없으면 실행 시 `importlib.metadata` 에서 죽는다.
+
+결과는 `dist/precheck_monitor/precheck_monitor.exe`.
 
 `config.ini` 는 exe 옆에 둔다(묶지 않는다). 그래야 접속 정보를 재빌드 없이 바꾼다.
 `dist/precheck_monitor/` 폴더를 통째로 압축해 전달하면 된다.
