@@ -9,6 +9,8 @@
    2. MIBKM_TPSS_DELAY_...28DAY → APT   fab.m_lot_spx
    3. MIBKM_DESIGNRULE     →  DR        fab.g_tpss_design_rule_record
    4. AREA.USER (ILP 406164) → EMP      dscrm_ds.crmadmin_if_zto_employee
+   (Spotfire 에 없는 보강)  → STEP_M   fab.m_step  (대기 건의 EQP_TYPE·STEP)
+   (Spotfire 에 없는 보강)  → APT_STEP fab.m_lot_spx (PPID 없는 대기 건의 1매 ST)
    5. 계산 컬럼 대상 / FORECAST_APT / LINEP → CALC
 
    ※ "Left single match join" 은 여러 건이 맞아도 1건만 붙인다는 뜻이다.
@@ -123,6 +125,28 @@ APT AS (
 ),
 
 /* ---------------------------------------------------------------------------
+   [보강] fab.m_lot_spx — PPID 없는 대기 건용 STEP 평균
+
+   Spotfire 에는 없다. 처음 주신 SQL 의 APT_STEP 과 같은 역할이다.
+   PPID 는 트랙인 이력에서 오므로 아직 측정 안 한 대기 건은 PPID 가 없고,
+   그러면 PPID 단위 평균(APT)이 안 붙어 예상 시간이 통째로 빈다.
+   사전 지정 관리는 '아직 안 한 건'을 보는 게 목적이라 그게 비면 쓸모가 없다.
+   그래서 PPID 를 뺀 STEP 단위 평균을 따로 만들어 받침으로 쓴다.
+   --------------------------------------------------------------------------- */
+APT_STEP AS (
+    SELECT
+        S.PROCESS_ID,
+        S.LOCATION_ID,
+        AVG(S.AST_TIME) AS AVG_APT_STEP,
+        COUNT(*)        AS APT_STEP_N
+    FROM   fab.m_lot_spx S
+    WHERE  S.OUT_TIME >= SYSDATE - 28
+      AND  S.PROCESS_ID  IS NOT NULL
+      AND  S.LOCATION_ID IS NOT NULL
+    GROUP BY S.PROCESS_ID, S.LOCATION_ID
+),
+
+/* ---------------------------------------------------------------------------
    [조인 3] fab.g_tpss_design_rule_record  (Spotfire: MIBKM_DESIGNRULE)
      Matched : PROCESS_ID - PROCESSID
      Added   : DESIGN_RULE
@@ -169,6 +193,38 @@ EMP AS (
 ),
 
 /* ---------------------------------------------------------------------------
+   [보강] fab.m_step — 사전 지정 STEP 의 설비 유형과 공정 이름
+
+   Spotfire 에는 없는 조인이다. 넣는 이유:
+   EQP_TYPE 과 STEP_ID 는 지금 m_lot_transn_hist 에서 오는데, 트랙인 이력이
+   없는 '대기 현황' 행은 그 값이 통째로 비어 버린다. 사전 지정 관리가 목적이면
+   아직 측정 안 한 건이 가장 중요한데 설비 유형이 안 보이면 못 쓴다.
+   m_lot_actv_req 에는 EQP_TYPE 이 없으므로(확인 완료) STEP 마스터에서 받는다.
+   TKIN 현황만 볼 때는 이력 값이 우선이라 결과가 달라지지 않는다.
+   --------------------------------------------------------------------------- */
+STEP_M_RANKED AS (
+    SELECT
+        M.LINE_ID,
+        M.PROCESS_ID,
+        M.STEP_SEQ,
+        M.EQP_TYPE,
+        M.STEP_ID,
+        M.STEP_DESC,
+        ROW_NUMBER() OVER (
+            PARTITION BY M.LINE_ID, M.PROCESS_ID, M.STEP_SEQ
+            ORDER BY     M.STEP_ID
+        ) AS RN
+    FROM   fab.m_step M
+    WHERE  M.LINE_ID    IS NOT NULL
+      AND  M.PROCESS_ID IS NOT NULL
+      AND  M.STEP_SEQ   IS NOT NULL
+),
+STEP_M AS (
+    SELECT LINE_ID, PROCESS_ID, STEP_SEQ, EQP_TYPE, STEP_ID, STEP_DESC
+    FROM   STEP_M_RANKED WHERE RN = 1
+),
+
+/* ---------------------------------------------------------------------------
    [연결] Spotfire 의 Add Data 4번을 한 번에 건다.
    --------------------------------------------------------------------------- */
 JOINED AS (
@@ -194,14 +250,17 @@ JOINED AS (
         H.TKOUT_DATA,
         H.PROCESS_START_DATE,
         H.SLOT_ID,                      -- ★FORECAST_APT 는 이 컬럼을 쓴다
-        H.EQP_TYPE,
-        H.STEP_ID,
-        H.STEP_DESC,
+        /* 이력이 있으면 이력값, 대기 건이면 STEP 마스터값 */
+        COALESCE(H.EQP_TYPE,  M.EQP_TYPE)  AS EQP_TYPE,
+        COALESCE(H.STEP_ID,   M.STEP_ID)   AS STEP_ID,
+        COALESCE(H.STEP_DESC, M.STEP_DESC) AS STEP_DESC,
         H.LOT_TYPE,
         H.TO_PROCESS_UNIT AS PROCESS_UNIT,   -- Spotfire LINEP 식의 PROCESS_UNIT
 
         A.AVG_APT,
         A.APT_N,
+        AS2.AVG_APT_STEP,
+        AS2.APT_STEP_N,
         D.DESIGN_RULE,
         U.EMP_NAME,
         U.DEPT_NAME
@@ -217,6 +276,13 @@ JOINED AS (
            ON  R.PROCESS_ID    = D.PROCESS_ID
     LEFT JOIN  EMP U
            ON  R.REQUESTER_ID  = U.EMP_NO
+    LEFT JOIN  APT_STEP AS2
+           ON  R.PROCESS_ID    = AS2.PROCESS_ID
+          AND  R.ACTV_STEP_SEQ = AS2.LOCATION_ID
+    LEFT JOIN  STEP_M M
+           ON  R.LINE_ID       = M.LINE_ID
+          AND  R.PROCESS_ID    = M.PROCESS_ID
+          AND  R.ACTV_STEP_SEQ = M.STEP_SEQ
 ),
 
 /* ---------------------------------------------------------------------------
@@ -248,6 +314,23 @@ CALC AS (
              ELSE LENGTH(J.ACTV_SLOT_ID)
                   - LENGTH(REPLACE(J.ACTV_SLOT_ID, ',', '')) + 1
         END                                                                    AS REQ_SLOT_COUNT,
+
+        /* 사전 관리용 예상 시간 — 위 FORECAST_APT 와 쓰임이 다르다.
+           FORECAST_APT     : Spotfire 식 그대로. 실제 트랙인된 슬롯 기준이라
+                              대기 건은 비어 있다. 실적 확인용.
+           FORECAST_APT_REQ : 요청 슬롯 수 x 1매 ST 기준. 1매 ST 는 PPID 평균을
+                              쓰되 PPID 가 없는 대기 건은 STEP 평균으로 받친다.
+                              측정 전에 부하를 보려면 이 값을 쓴다. */
+        COALESCE(J.AVG_APT, J.AVG_APT_STEP)                                    AS AVG_APT_USED,
+        CASE WHEN J.AVG_APT IS NOT NULL THEN 'PPID'
+             WHEN J.AVG_APT_STEP IS NOT NULL THEN 'STEP 평균'
+             ELSE 'ST 미등록'
+        END                                                                    AS ST_SOURCE,
+        COALESCE(J.AVG_APT, J.AVG_APT_STEP) *
+            CASE WHEN J.ACTV_SLOT_ID IS NULL THEN 0
+                 ELSE LENGTH(J.ACTV_SLOT_ID)
+                      - LENGTH(REPLACE(J.ACTV_SLOT_ID, ',', '')) + 1
+            END                                                                AS FORECAST_APT_REQ,
 
         /* 8. LINEP
            PROCESS_UNIT = m_lot_transn_hist.TO_PROCESS_UNIT.
@@ -303,6 +386,9 @@ SELECT
     PPID,
     AVG_APT,
     FORECAST_APT,
+    AVG_APT_USED,
+    FORECAST_APT_REQ,
+    ST_SOURCE,
     APT_N,
     대상,
     REQUESTER_ID       AS REQ_USER_ID,
@@ -330,9 +416,12 @@ ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
    미확정 1건 — 사내에서 확인한 뒤 이 파일만 고치면 된다
 
    ※ 함께 받은 컬럼 정리표는 사진·메모로 재구성한 자료라 실제 DB 와 다를 수 있다.
-     REQUESTER_ID, TO_PROCESS_UNIT, TKOUT_DATA 는 정리표에 없거나 다른 이름으로
-     적혀 있었지만 셋 다 실재하는 컬럼으로 확인되어 그대로 쓴다.
-     "정리표에 없다"를 "DB 에 없다"로 읽지 말 것.
+     확인 완료된 것
+       있음 : m_lot_actv_req.REQUESTER_ID / .REQUEST_COMMENT
+              m_lot_transn_hist.TO_PROCESS_UNIT (= LINEP 의 PROCESS_UNIT)
+              m_lot_transn_hist.TKOUT_DATA (LINE_ID 와 함께 파티션 키)
+       없음 : m_lot_actv_req.EQP_TYPE  -> STEP 마스터(m_step)에서 받는다
+     정리표만 보고 판단하지 말고 아래로 직접 확인할 것.
          SELECT * FROM fab.m_lot_actv_req     WHERE ROWNUM <= 5;
          SELECT * FROM fab.m_lot_transn_hist  WHERE ROWNUM <= 5;
    ----------------------------------------------------------------------------
@@ -351,7 +440,8 @@ ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
           GROUP BY PROCESS_ID HAVING COUNT(DISTINCT AREA) > 1;
    ----------------------------------------------------------------------------
    Spotfire 와 결과가 달라 보일 때 먼저 볼 것
-     - FORECAST_APT 가 비어 있다  → SLOT_ID(트랙인 슬롯)가 NULL. 대기 건은 정상
+     - FORECAST_APT 가 비어 있다  → SLOT_ID(트랙인 슬롯)가 NULL. 대기 건은 정상.
+                                     측정 전 부하는 FORECAST_APT_REQ 로 본다
      - 대기 건이 전부 '비대상'    → Spotfire 원본과 같은 동작. 대상2 주석 참고
      - 행 수가 Spotfire 보다 많다 → single match 축약(HIST/DR/EMP)이 빠졌는지 확인
      - 조회가 느리다 → m_lot_transn_hist 는 LINE_ID + TKOUT_DATA 가 파티션 키다.
