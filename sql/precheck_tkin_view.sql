@@ -115,17 +115,22 @@ HIST AS (
    --------------------------------------------------------------------------- */
 APT AS (
     SELECT
+        S.AREA AS LINE_ID,
         S.PPID,
         S.PROCESS_ID,
         S.LOCATION_ID,
         AVG(S.AST_TIME) AS AVG_APT,
         COUNT(*)        AS APT_N
     FROM   fab.m_lot_spx S
-    WHERE  S.OUT_TIME >= SYSDATE - 28        -- OUT_TIME 은 파티션 키. 반드시 건다
+    /* 파티션 키는 AREA 와 OUT_TIME 이다. 둘 다 걸어야 파티션이 잘린다.
+       Spotfire 매칭 키에는 AREA 가 없었지만, 빼면 전 라인 파티션을 읽고
+       게다가 라인이 섞인 평균이 나온다. AREA = 다른 테이블의 LINE_ID 다. */
+    WHERE  S.OUT_TIME >= SYSDATE - 28
+      AND  S.AREA IN (SELECT DISTINCT LINE_ID FROM REQ_BASE)
       AND  S.PPID        IS NOT NULL
       AND  S.PROCESS_ID  IS NOT NULL
       AND  S.LOCATION_ID IS NOT NULL
-    GROUP BY S.PPID, S.PROCESS_ID, S.LOCATION_ID
+    GROUP BY S.AREA, S.PPID, S.PROCESS_ID, S.LOCATION_ID
 ),
 
 /* ---------------------------------------------------------------------------
@@ -139,15 +144,17 @@ APT AS (
    --------------------------------------------------------------------------- */
 APT_STEP AS (
     SELECT
+        S.AREA AS LINE_ID,
         S.PROCESS_ID,
         S.LOCATION_ID,
         AVG(S.AST_TIME) AS AVG_APT_STEP,
         COUNT(*)        AS APT_STEP_N
     FROM   fab.m_lot_spx S
     WHERE  S.OUT_TIME >= SYSDATE - 28
+      AND  S.AREA IN (SELECT DISTINCT LINE_ID FROM REQ_BASE)
       AND  S.PROCESS_ID  IS NOT NULL
       AND  S.LOCATION_ID IS NOT NULL
-    GROUP BY S.PROCESS_ID, S.LOCATION_ID
+    GROUP BY S.AREA, S.PROCESS_ID, S.LOCATION_ID
 ),
 
 /* ---------------------------------------------------------------------------
@@ -160,17 +167,22 @@ APT_STEP AS (
    --------------------------------------------------------------------------- */
 DR_RANKED AS (
     SELECT
-        D.PROCESS_ID,
-        D.DESIGN_RULE,
+        DRR.AREA AS LINE_ID,
+        DRR.PROCESS_ID,
+        DRR.DESIGN_RULE,
         ROW_NUMBER() OVER (
-            PARTITION BY D.PROCESS_ID
-            ORDER BY     D.REV_TIME DESC, D.DESIGN_RULE DESC
+            /* PK 가 (AREA, PROCESS_ID, DESIGN_RULE) 다. AREA 를 빼고 묶으면
+               같은 제품을 여러 라인에서 돌릴 때 다른 라인의 DESIGN_RULE 이
+               붙고, 그게 LINEP 분류(P1D/P1F)까지 바꿔 버린다. */
+            PARTITION BY DRR.AREA, DRR.PROCESS_ID
+            ORDER BY     DRR.REV_TIME DESC, DRR.DESIGN_RULE DESC
         ) AS RN
-    FROM   fab.g_tpss_design_rule_record D
-    WHERE  D.PROCESS_ID IS NOT NULL
+    FROM   fab.g_tpss_design_rule_record DRR
+    WHERE  DRR.AREA       IS NOT NULL
+      AND  DRR.PROCESS_ID IS NOT NULL
 ),
 DR AS (
-    SELECT PROCESS_ID, DESIGN_RULE FROM DR_RANKED WHERE RN = 1
+    SELECT LINE_ID, PROCESS_ID, DESIGN_RULE FROM DR_RANKED WHERE RN = 1
 ),
 
 /* ---------------------------------------------------------------------------
@@ -319,15 +331,18 @@ JOINED AS (
            ON  R.LOT_ID        = H.LOT_ID
           AND  R.ACTV_STEP_SEQ = H.STEP_SEQ
     LEFT JOIN  APT A
-           ON  H.PPID          = A.PPID
+           ON  R.LINE_ID       = A.LINE_ID
+          AND  H.PPID          = A.PPID
           AND  R.PROCESS_ID    = A.PROCESS_ID
           AND  R.ACTV_STEP_SEQ = A.LOCATION_ID
     LEFT JOIN  DR D
-           ON  R.PROCESS_ID    = D.PROCESS_ID
+           ON  R.LINE_ID       = D.LINE_ID
+          AND  R.PROCESS_ID    = D.PROCESS_ID
     LEFT JOIN  EMP U
            ON  R.REQUESTER_ID  = U.EMP_NO
     LEFT JOIN  APT_STEP AS2
-           ON  R.PROCESS_ID    = AS2.PROCESS_ID
+           ON  R.LINE_ID       = AS2.LINE_ID
+          AND  R.PROCESS_ID    = AS2.PROCESS_ID
           AND  R.ACTV_STEP_SEQ = AS2.LOCATION_ID
     LEFT JOIN  WIP W
            ON  R.LINE_ID       = W.LINE_ID
@@ -488,43 +503,35 @@ ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
 
 
 /* ============================================================================
-   미확정 1건 — 사내에서 확인한 뒤 이 파일만 고치면 된다
+   확인 완료 — 미확정 없음
 
-   ※ 함께 받은 컬럼 정리표는 사진·메모로 재구성한 자료라 실제 DB 와 다를 수 있다.
-     확인 완료된 것
-       있음 : m_lot_actv_req.REQUESTER_ID / .REQUEST_COMMENT
-              m_lot_transn_hist.TO_PROCESS_UNIT (= LINEP 의 PROCESS_UNIT)
-              m_lot_transn_hist.TKOUT_DATA (LINE_ID 와 함께 파티션 키)
-       없음 : m_lot_actv_req.EQP_TYPE  -> STEP 마스터(m_step)에서 받는다
-       미사용 : m_lot_transn_hist.LOT_TRANSN_TIME
-                처음 받은 SQL 이 ORDER BY 에 썼지만 쓰지 않는 컬럼이다.
-                같은 LOT·STEP 이력이 여러 건일 때 1건을 고르는 기준은
-                TKIN_DATE -> PROCESS_START_DATE -> LAST_UPDATE_DATE 순으로 둔다.
-     정리표만 보고 판단하지 말고 아래로 직접 확인할 것.
-         SELECT * FROM fab.m_lot_actv_req     WHERE ROWNUM <= 5;
-         SELECT * FROM fab.m_lot_transn_hist  WHERE ROWNUM <= 5;
-   ----------------------------------------------------------------------------
-   1) 라인(AREA) 을 조인 키에 넣을지 — m_lot_spx 와 g_tpss_design_rule_record 둘 다
-      Spotfire 매칭 키를 그대로 옮겼는데, 두 테이블 모두 AREA 가 키의 일부다.
-        - m_lot_spx           매칭 PPID + PROCESS_ID + LOCATION_ID  (AREA 없음)
-        - g_tpss_design_rule  매칭 PROCESS_ID                        (AREA 없음)
-      같은 제품이 여러 라인에서 돌면 다른 라인 값이 붙는다. 모의 데이터로
-      확인했을 때 PFBP LOT 에 PFBB 의 DESIGN_RULE 이 붙었고, 그 값이 LINEP
-      분류(P1D/P1F)를 바꿨다. AVG_APT 도 라인 섞인 평균이 된다.
-      라인별로 관리한다면 아래를 추가한다 (Spotfire 원본과는 달라진다).
-        APT  : GROUP BY 에 S.AREA 추가 + 조인에 A.AREA = AR.LINE_ID
-        DR   : PARTITION BY D.AREA, D.PROCESS_ID + 조인에 D.AREA = AR.LINE_ID
-      확인 쿼리:
-          SELECT PROCESS_ID, COUNT(DISTINCT AREA) FROM fab.g_tpss_design_rule_record
-          GROUP BY PROCESS_ID HAVING COUNT(DISTINCT AREA) > 1;
+   컬럼 정리표(사진·메모 재구성본)와 실제 DB 가 달랐던 것들. 전부 사내 확인됨.
+     있음   : m_lot_actv_req.REQUESTER_ID / .REQUEST_COMMENT
+              m_lot_transn_hist.TO_PROCESS_UNIT  (= LINEP 의 PROCESS_UNIT)
+              m_lot_transn_hist.TKOUT_DATA       (트랙아웃. TKOUT_TIME 아님)
+     없음   : m_lot_actv_req.EQP_TYPE            (m_step 에서 받는다)
+     미사용 : m_lot_transn_hist.LOT_TRANSN_TIME  (정렬은 LAST_UPDATE_DATE)
+
+   키 (성능·정확도에 직결)
+     m_lot_transn_hist        파티션 키 : LINE_ID, TKOUT_DATA
+     m_lot_spx                파티션 키 : AREA, OUT_TIME
+     g_tpss_design_rule_record  PK      : AREA, PROCESS_ID, DESIGN_RULE
+     → 셋 다 WHERE / GROUP BY / 조인에 반영했다. AREA 는 다른 테이블의 LINE_ID 다.
+
+   ※ Spotfire 매칭 키에는 AREA 가 없었다. 라인을 넣은 쪽이 맞다고 보고 넣었으므로
+     라인이 섞여 있던 Spotfire 결과와는 숫자가 다를 수 있다. 그게 정상이다.
+     굳이 Spotfire 와 똑같이 맞춰야 하면 APT / APT_STEP / DR 의 LINE_ID 조건만 뺀다.
    ----------------------------------------------------------------------------
    Spotfire 와 결과가 달라 보일 때 먼저 볼 것
      - FORECAST_APT 가 비어 있다  → SLOT_ID(트랙인 슬롯)가 NULL. 대기 건은 정상.
                                      측정 전 부하는 FORECAST_APT_REQ 로 본다
      - 대기 건이 전부 '비대상'    → Spotfire 원본과 같은 동작. 대상2 주석 참고
      - 행 수가 Spotfire 보다 많다 → single match 축약(HIST/DR/EMP)이 빠졌는지 확인
-     - 조회가 느리다 → m_lot_transn_hist 는 LINE_ID + TKOUT_DATA 가 파티션 키다.
-       둘 다 WHERE 에 있는지, TKIN_DATE 로 거르고 있지 않은지 본다
+     - 조회가 느리다 → 파티션 키가 WHERE 에 다 있는지 본다.
+       m_lot_transn_hist = LINE_ID + TKOUT_DATA, m_lot_spx = AREA + OUT_TIME.
+       TKIN_DATE 나 다른 컬럼으로 거르면 파티션이 안 잘린다
+     - AVG_APT 가 전보다 자주 빈다 → 라인별로 묶기 시작해서 그렇다.
+       그 라인에 그 PPID 실적이 없다는 뜻이고 ST_SOURCE 로 확인된다
      - 설비에 올라가 있는 LOT 이 안 보인다 → TKOUT_DATA IS NULL 조건이 빠졌다
    ----------------------------------------------------------------------------
    MySQL 로 옮길 때
