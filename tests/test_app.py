@@ -16,7 +16,8 @@ APP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 TODAY = date.today()
 
 TOPS = ["전체 현황", "부서별 Manual 사전 지정 현황", "LOT 상세 조회"]
-EXTRA = ["부하·CAPA", "부서별 조정 요청", "Manual 상세", "Manual 주차 추이",
+EXTRA = ["부하·CAPA", "부서별 조정 요청", "Manual 상세",
+         "주차별 부서별 현황", "주차별 PPID·STEP Worst 10", "주차별 요청자 Worst 10",
          "ST TOP 10", "사유 분류", "일자 추이", "STEP 분포", "전주 대비 PPID"]
 PAGES = TOPS + EXTRA
 
@@ -57,11 +58,31 @@ def test_trend(scope, metric):
     run(nav=TOPS[0], t_scope=scope, t_metric=metric)
 
 
+WEEK_PAGES = [("주차별 부서별 현황", "wd"),
+              ("주차별 PPID·STEP Worst 10", "wp"),
+              ("주차별 요청자 Worst 10", "wu")]
+
+
+@pytest.mark.parametrize("page,kp", WEEK_PAGES)
 @pytest.mark.parametrize("weeks", ["4주", "8주", "12주"])
-@pytest.mark.parametrize("by", ["PPID", "부서"])
 @pytest.mark.parametrize("metric", ["측정시간", "LOT 수", "매수"])
-def test_weekly(weeks, by, metric):
-    run(nav="Manual 주차 추이", w_weeks=weeks, w_by=by, w_metric=metric)
+def test_weekly(page, kp, weeks, metric):
+    """주차별 3화면 x 기간 3종 x 지표 3종."""
+    run(**{"nav": page, f"{kp}_weeks": weeks, f"{kp}_metric": metric})
+
+
+def test_weekly_same_total():
+    """세 화면이 같은 모수를 쓰는지 — 같은 주 합계가 일치해야 한다."""
+    import pandas as pd
+    from datetime import date as _d
+    sys_path_df = __import__("data_source").load_weeks(_d.today(), 12)
+    m = sys_path_df[sys_path_df["상태"].ne("Cancel") & sys_path_df["사유"].eq("Manual")]
+    wk = m["요청일"].dt.to_period("W").dt.start_time
+    by_dept = m.groupby([wk, m["DEPARTMENT"]])["예상APT"].sum().groupby(level=0).sum()
+    by_ppid = m.groupby([wk, m["PPID"]])["예상APT"].sum().groupby(level=0).sum()
+    by_user = m.groupby([wk, m["요청자"]])["예상APT"].sum().groupby(level=0).sum()
+    assert by_dept.round(3).equals(by_ppid.round(3))
+    assert by_dept.round(3).equals(by_user.round(3))
 
 
 @pytest.mark.parametrize("by", ["LOT", "PPID", "STEP", "요청자", "부서"])
@@ -74,6 +95,12 @@ def test_threshold(thr):
     """알람 임계치를 바꿔도 모든 카드가 돌아야 한다 (0건 / 다수 / 중간)."""
     run(nav=TOPS[0], thr=thr)
     run(nav=TOPS[2], thr=thr, lot_unit="LOT 단위")
+
+
+def test_weekly_empty_filter():
+    """필터로 Manual 이 0건이 되어도 주차 화면이 안내만 띄워야 한다."""
+    for page, _ in WEEK_PAGES:
+        run(nav=page, f_rsn=["DSM"])
 
 
 def test_alarm_all_states():

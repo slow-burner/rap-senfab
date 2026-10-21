@@ -178,8 +178,36 @@ def _sample(d_from: date, d_to: date) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------- 실제 DB 연결
+SQL_FILE = "sql/precheck_tkin_view.sql"
+
+# SQL 출력 컬럼 -> 화면이 쓰는 컬럼 (COLUMNS)
+# 왼쪽을 바꾸려면 sql/precheck_tkin_view.sql 의 마지막 SELECT 도 같이 본다.
+SQL_TO_APP = {
+    "RESERVE_DATE":     "요청일",     # 사전 지정 요청 시각 (UPDATE_DATE)
+    "LINEP":            "LINEID",     # 라인 분류 (P1F / P2D ...)
+    "EQP_TYPE":         "EQP_TYPE",
+    "PROC_ID":          "PROCESSID",
+    "STEP_ID":          "STEPID",
+    "ACTY_STEP_SEQ":    "STEP_SEQ",   # 사전 지정을 건 계측 STEP
+    "PPID":             "PPID",
+    "DEPT_NAME":        "DEPARTMENT",
+    "LOT_ID":           "LOTID",
+    "ACTY_SLOT_ID":     "SLOTID",
+    "REQ_SLOT_COUNT":   "지정매수",   # 요청 슬롯 수. 트랙인 슬롯이 아니다
+    "AVG_APT_USED":     "APT_매",     # PPID 평균, 없으면 STEP 평균
+    "FORECAST_APT_REQ": "예상APT",    # 요청 슬롯 기준 총측정시간
+}
+# 화면이 안 쓰지만 같이 들고 다니는 컬럼 (주차 화면·상세 표에서 쓴다)
+SQL_EXTRA = [
+    "계측유무", "측정상태", "STEP_도달", "CUR_STEP_SEQ", "CUR_STEP_DESC",
+    "BAY_NAME", "WORK_STATUS_SEQ", "PROCESS_EQP_ID", "ST_SOURCE", "APT_N",
+    "FORECAST_APT", "SLOT_COUNT", "DESIGN_RULE", "REQ_USER_ID", "EMP_NAME",
+    "TKIN_DATE", "TKOUT_DATA",
+]
+
+
 def _cfg() -> configparser.ConfigParser:
-    """exe 폴더 옆의 config.ini를 읽는다."""
+    """exe 폴더 옆의 config.ini 를 읽는다."""
     cp = configparser.ConfigParser()
     here = os.path.dirname(os.path.abspath(__file__))
     for p in (os.path.join(os.getcwd(), "config.ini"), os.path.join(here, "config.ini")):
@@ -189,81 +217,126 @@ def _cfg() -> configparser.ConfigParser:
     return cp
 
 
-def _db(d_from: date, d_to: date) -> pd.DataFrame:
-    """MySQL 사전 지정 요청/승인 + bdq 계측 진행 여부를 LOTID+STEPID로 merge.
+def _sql_text() -> str:
+    """조회 SQL 본문. 파일 하나만 고치면 프로그램과 수작업 조회가 같이 바뀐다."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for base in (here, os.getcwd()):
+        p = os.path.join(base, SQL_FILE)
+        if os.path.exists(p):
+            txt = open(p, encoding="utf-8").read()
+            # 파일 끝의 설명 주석을 떼고 본문만 쓴다
+            return txt.split(";")[0]
+    raise FileNotFoundError(f"{SQL_FILE} 을 찾을 수 없습니다")
 
-    사내망에서 아래 SQL/테이블명을 실제 이름으로 바꾼다.
-    ST(APT_매)가 별도 기준표에 있으면 PPID로 붙인다.
-    """
-    import pymysql  # noqa: F401  (exe 빌드 때 포함되도록 여기서 import)
-    from bigdataquery import bdq  # type: ignore
 
-    cp = _cfg()
-    sec = cp["mysql"]
-    conn = pymysql.connect(
-        host=sec["host"],
-        port=int(sec["port"]),          # port는 반드시 int 변환
-        user=sec["user"],
-        password=sec["password"],
-        database=sec["database"],
-        charset="utf8mb4",
-    )
+def _connect():
+    """config.ini 의 [oracle] 로 접속한다. 드라이버는 oracledb 를 먼저 본다."""
+    sec = _cfg()["oracle"]
     try:
-        req = pd.read_sql(
-            """
-            SELECT  req_dttm       AS 요청일,
-                    line_id        AS LINEID,
-                    eqp_type       AS EQP_TYPE,
-                    process_id     AS PROCESSID,
-                    step_id        AS STEPID,
-                    step_seq       AS STEP_SEQ,
-                    ppid           AS PPID,
-                    dept_nm        AS DEPARTMENT,
-                    req_user       AS 요청자,
-                    lot_id         AS LOTID,
-                    slot_id        AS SLOTID,
-                    slot_cnt       AS 지정매수,
-                    reason_cd      AS 사유,
-                    approve_status AS 승인상태
-            FROM    metro_precheck_request
-            WHERE   req_dttm >= %s AND req_dttm < %s
-            """,
-            conn, params=(str(d_from), str(d_to + timedelta(days=1))),
-        )
-        stdf = pd.read_sql(
-            "SELECT ppid AS PPID, apt_per_wafer AS APT_매 FROM metro_ppid_st", conn
+        import oracledb as drv            # thin 모드. 클라이언트 설치 불필요
+    except ImportError:                    # 구버전 환경
+        import cx_Oracle as drv            # type: ignore
+    dsn = sec.get("dsn") or drv.makedsn(
+        sec["host"], int(sec["port"]), service_name=sec["service_name"])
+    return drv.connect(user=sec["user"], password=sec["password"], dsn=dsn)
+
+
+def _db(d_from: date, d_to: date) -> pd.DataFrame:
+    """sql/precheck_tkin_view.sql 을 :d_from / :d_to 바인드로 실행한다."""
+    conn = _connect()
+    try:
+        return pd.read_sql(
+            _sql_text(), conn,
+            params={"d_from": datetime.combine(d_from, datetime.min.time()),
+                    "d_to":   datetime.combine(d_to + timedelta(days=1),
+                                               datetime.min.time())},
         )
     finally:
         conn.close()
 
-    df = req.merge(stdf, on="PPID", how="left")
 
-    # 계측 진행 여부 (완료/예정/Cancel)
-    run = bdq.query(
-        f"""
-        SELECT lot_id AS LOTID, step_id AS STEPID, meas_status AS 상태
-        FROM   metrology_history
-        WHERE  meas_dt BETWEEN '{d_from}' AND '{d_to}'
-        """
-    )
-    df = df.merge(run, on=["LOTID", "STEPID"], how="left")
-    df["상태"] = df["상태"].fillna("예정")
+def _map_db(df: pd.DataFrame) -> pd.DataFrame:
+    """SQL 출력을 화면이 쓰는 컬럼 이름·값으로 바꾼다.
+
+    여기서만 코드값을 번역한다. 사내 코드가 다르면 capa_config 의
+    REASON_MAP / APPROVE_MAP / CANCEL_CODES 만 고치면 된다.
+    """
+    import capa_config as C
+
+    if df.empty:
+        return pd.DataFrame(columns=COLUMNS)
+    df = df.rename(columns=SQL_TO_APP).copy()
+
+    # 사유 · 승인상태 : 코드값 -> 화면 값
+    df["사유"] = df.get("REQUEST_TYPE", "").map(C.classify_reason)
+    df["승인상태"] = df.get("REQ_STATUS", "").map(C.classify_approve)
+
+    # 상태 : 대기 현황 -> 예정 / 측정중 -> 진행 / 완료 -> 완료
+    #        요청 자체가 취소된 건은 Cancel
+    def _state(r):
+        if C.is_cancel(r.get("REQ_STATUS")):
+            return "Cancel"
+        if r.get("계측유무") == "대기 현황":
+            return "예정"
+        return "진행" if r.get("측정상태") == "측정중" else "완료"
+
+    df["상태"] = df.apply(_state, axis=1)
+
+    # 요청자 : 이름(사번). 이름이 없으면 사번만
+    nm = df.get("EMP_NAME")
+    no = df.get("REQ_USER_ID")
+    df["요청자"] = [
+        f"{a}({b})" if a else str(b or "-")
+        for a, b in zip(nm.fillna("") if nm is not None else [""] * len(df),
+                        no if no is not None else [""] * len(df))
+    ]
+
+    # AST_TIME 단위 보정 (초로 들어오면 capa_config.AST_UNIT_MIN = 1/60)
+    for c in ("APT_매", "예상APT", "FORECAST_APT"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce") * C.AST_UNIT_MIN
+
     df["요청일"] = pd.to_datetime(df["요청일"])
-    df["APT_매"] = pd.to_numeric(df["APT_매"], errors="coerce").fillna(0.0)
     df["지정매수"] = pd.to_numeric(df["지정매수"], errors="coerce").fillna(0).astype(int)
-    df["예상APT"] = df["APT_매"] * df["지정매수"]
+    df["APT_매"] = df["APT_매"].fillna(0.0)
+    df["예상APT"] = df["예상APT"].fillna(0.0)
+
+    keep = COLUMNS + [c for c in SQL_EXTRA if c in df.columns]
     for c in COLUMNS:
         if c not in df.columns:
             df[c] = ""
-    return df[COLUMNS]
+    return df[keep]
+
+
+def _normalize(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["요청일"] = pd.to_datetime(df["요청일"])
+    return df.reset_index(drop=True)
 
 
 def load_raw(d_from: date, d_to: date) -> pd.DataFrame:
     """조회 구간의 사전 지정 내역. 화면은 이 함수만 호출한다."""
     if USE_SAMPLE:
-        df = _sample(d_from, d_to)
-    else:
-        df = _db(d_from, d_to)
-    df = df.copy()
-    df["요청일"] = pd.to_datetime(df["요청일"])
-    return df.reset_index(drop=True)
+        return _normalize(_sample(d_from, d_to))
+    return _normalize(_map_db(_db(d_from, d_to)))
+
+
+def load_weeks(d_to: date, weeks: int) -> pd.DataFrame:
+    """주차별 화면용. 완료 건까지 포함해 최근 N주를 가져온다."""
+    return load_raw(d_to - timedelta(days=7 * weeks - 1), d_to)
+
+
+def options() -> dict:
+    """사이드바 필터 목록. 조회 전에 그려야 해서 따로 받는다."""
+    if USE_SAMPLE:
+        return {"lines": list(LINEIDS), "depts": list(DEPTS)}
+    conn = _connect()
+    try:
+        ln = pd.read_sql("SELECT DISTINCT LINE_ID FROM fab.m_lot_actv_req", conn)
+        dp = pd.read_sql(
+            "SELECT DISTINCT ORG_DEPT_KOR_NM AS D FROM dscrm_ds.crmadmin_if_zto_employee "
+            "WHERE ORG_DEPT_KOR_NM IS NOT NULL", conn)
+        return {"lines": sorted(ln.iloc[:, 0].dropna().tolist()),
+                "depts": sorted(dp.iloc[:, 0].dropna().tolist())}
+    finally:
+        conn.close()

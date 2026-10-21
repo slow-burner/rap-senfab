@@ -47,7 +47,13 @@ REQ_BASE AS (
         AR.UPDATE_DATE,
         AR.REQUESTER_ID                  -- 요청자 사번. 조인 4의 EMP_NO 와 맞춘다
     FROM   fab.m_lot_actv_req AR
-    WHERE  AR.UPDATE_DATE >= SYSDATE - 1
+    /* 조회 기간. 프로그램이 :d_from / :d_to 를 넘긴다.
+       SQL 툴에서 직접 돌릴 때는 아래처럼 날짜 리터럴로 바꿔 쓴다.
+         AR.UPDATE_DATE >= TO_DATE('2026-10-18','YYYY-MM-DD')
+         AR.UPDATE_DATE <  TO_DATE('2026-10-22','YYYY-MM-DD')
+       Spotfire 의 MANUAL_RESER_24H 와 똑같이 보려면 24시간으로 준다. */
+    WHERE  AR.UPDATE_DATE >= :d_from
+      AND  AR.UPDATE_DATE <  :d_to
 ),
 
 /* ---------------------------------------------------------------------------
@@ -93,7 +99,7 @@ HIST_RANKED AS (
        ★ TKOUT_DATA IS NULL 을 반드시 같이 둔다. 지금 설비에 들어가 있는
          (= TKIN 했고 아직 TKOUT 안 한) LOT 이 바로 'TKIN 현황' 의 대상인데,
          TKOUT_DATA >= ... 만 쓰면 그 행이 통째로 빠진다. */
-    WHERE  ( H.TKOUT_DATA >= SYSDATE - 8 OR H.TKOUT_DATA IS NULL )
+    WHERE  ( H.TKOUT_DATA >= :d_from - 8 OR H.TKOUT_DATA IS NULL )
       AND  H.LINE_ID  IN (SELECT DISTINCT LINE_ID FROM REQ_BASE)
       AND  H.LOT_ID   IS NOT NULL            -- 빈 값은 매칭하지 않음
       AND  H.STEP_SEQ IS NOT NULL
@@ -125,7 +131,7 @@ APT AS (
     /* 파티션 키는 AREA 와 OUT_TIME 이다. 둘 다 걸어야 파티션이 잘린다.
        Spotfire 매칭 키에는 AREA 가 없었지만, 빼면 전 라인 파티션을 읽고
        게다가 라인이 섞인 평균이 나온다. AREA = 다른 테이블의 LINE_ID 다. */
-    WHERE  S.OUT_TIME >= SYSDATE - 28
+    WHERE  S.OUT_TIME >= :d_to - 28
       AND  S.AREA IN (SELECT DISTINCT LINE_ID FROM REQ_BASE)
       AND  S.PPID        IS NOT NULL
       AND  S.PROCESS_ID  IS NOT NULL
@@ -150,7 +156,7 @@ APT_STEP AS (
         AVG(S.AST_TIME) AS AVG_APT_STEP,
         COUNT(*)        AS APT_STEP_N
     FROM   fab.m_lot_spx S
-    WHERE  S.OUT_TIME >= SYSDATE - 28
+    WHERE  S.OUT_TIME >= :d_to - 28
       AND  S.AREA IN (SELECT DISTINCT LINE_ID FROM REQ_BASE)
       AND  S.PROCESS_ID  IS NOT NULL
       AND  S.LOCATION_ID IS NOT NULL

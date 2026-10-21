@@ -19,16 +19,17 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 import capa_config as C
-from data_source import DEPTS, load_raw
+from data_source import load_raw, load_weeks, options as ds_options
 
 st.set_page_config(page_title="계측 사전 지정 부하 모니터", layout="wide", page_icon="📐")
 
 TOPS = ["전체 현황", "부서별 Manual 사전 지정 현황", "LOT 상세 조회"]
 EXTRA_HEAD = "기타 분석"
-EXTRA = [EXTRA_HEAD, "부하·CAPA", "부서별 조정 요청", "Manual 상세", "Manual 주차 추이",
+EXTRA = [EXTRA_HEAD, "부하·CAPA", "부서별 조정 요청", "Manual 상세",
+         "주차별 부서별 현황", "주차별 PPID·STEP Worst 10", "주차별 요청자 Worst 10",
          "ST TOP 10", "사유 분류", "일자 추이", "STEP 분포", "전주 대비 PPID"]
+WEEK_PAGES = {"주차별 부서별 현황", "주차별 PPID·STEP Worst 10", "주차별 요청자 Worst 10"}
 CARD_PAGES = {TOPS[0], TOPS[1]}
-DEPT_ALL = list(DEPTS)        # 요청 부서 목록 (조회 전에 필터를 그려야 해서 기준표에서 받는다)
 
 for k, v in {"nav": TOPS[0], "extra_pick": EXTRA_HEAD}.items():
     st.session_state.setdefault(k, v)
@@ -110,11 +111,30 @@ def bd(kind: str, text: str) -> str:
     return f"<span class='bd {kind}'>{esc(text)}</span>"
 
 
+_BAD_SHEET = set("/\\?*[]:")
+
+
+def sheet_name(name: str, used: set) -> str:
+    """엑셀 시트 이름 규칙에 맞춘다.
+
+    주차 라벨(10/13주)처럼 / 가 들어가면 openpyxl 이 통째로 죽는다.
+    31자 제한과 중복도 여기서 막는다.
+    """
+    s = "".join("-" if ch in _BAD_SHEET else ch for ch in str(name)).strip()[:31] or "Sheet"
+    base, i = s, 2
+    while s in used:
+        s = f"{base[:28]}_{i}"
+        i += 1
+    used.add(s)
+    return s
+
+
 def xls(frames: dict[str, pd.DataFrame]) -> bytes:
     buf = io.BytesIO()
+    used: set = set()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         for name, d in frames.items():
-            d.to_excel(w, sheet_name=name[:31], index=False)
+            d.to_excel(w, sheet_name=sheet_name(name, used), index=False)
     return buf.getvalue()
 
 
@@ -250,6 +270,23 @@ def get_data(a: date, b: date) -> pd.DataFrame:
     return load_raw(a, b)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_weeks(b: date, weeks: int) -> pd.DataFrame:
+    """주차별 화면용. 완료 건까지 포함한 최근 N주."""
+    return load_weeks(b, weeks)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_options() -> dict:
+    """사이드바 필터 목록. 조회 전에 그려야 해서 따로 받는다."""
+    return ds_options()
+
+
+OPT = get_options()
+LINE_OPTS = OPT["lines"]
+DEPT_ALL = OPT["depts"]
+
+
 TODAY = date.today()
 
 # ============================================================ 사이드바
@@ -261,7 +298,7 @@ sb.markdown(
     unsafe_allow_html=True)
 hero_slot = sb.empty()
 
-f_line = sb.multiselect("LINEID", ["M1A", "M1B", "M2A"], key="f_line",
+f_line = sb.multiselect("LINEID", LINE_OPTS, key="f_line",
                         placeholder="전체")
 f_eqp = sb.multiselect("EQP TYPE", C.EQP_ALL, key="f_eqp", placeholder="전체")
 
@@ -1143,79 +1180,350 @@ elif PAGE == "Manual 상세":
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
-# ============================================= 기타 분석 · Manual 주차 추이
-elif PAGE == "Manual 주차 추이":
-    st.markdown("<div class='sec'>Manual 주차 추이</div>", unsafe_allow_html=True)
-    w1, w2, w3 = st.columns([1.1, 1.2, 1.8])
-    weeks = int(seg(w1, "기간", ["4주", "8주", "12주"], "w_weeks")[:-1])
-    w_by = seg(w2, "구분", ["PPID", "부서"], "w_by")
-    w_metric = seg(w3, "지표", ["측정시간", "LOT 수", "매수"], "w_metric")
+# =========================================== 주차별 3화면 · 공통
+def week_base(weeks: int) -> pd.DataFrame:
+    """주차별 화면의 공통 모수.
 
-    wdf = apply_filters(get_data(d_to - timedelta(days=7 * weeks - 1), d_to))
-    wdf = wdf[wdf["상태"].ne("Cancel") & wdf["사유"].eq(MAN)].copy()
-    if wdf.empty:
+    세 화면이 같은 숫자를 말하도록 여기 한 곳에서만 만든다.
+      - 완료 건까지 포함한 최근 N주 (알람용 조회와 모수가 다르다)
+      - Manual 만, Cancel 제외
+      - 주차는 요청일의 ISO 주차(월요일 시작)
+    """
+    w = apply_filters(get_weeks(d_to, weeks))
+    if w.empty:
+        return w
+    w = w[w["상태"].ne("Cancel") & w["사유"].eq(MAN)].copy()
+    if w.empty:
+        return w
+    w["주차"] = w["요청일"].dt.to_period("W").dt.start_time
+    return w
+
+
+def week_agg(df: pd.DataFrame, keys: list, metric: str):
+    """지표 하나를 키 기준으로 집계한다. 단위 문자열을 같이 돌려준다."""
+    if metric == "측정시간":
+        g = df.groupby(keys, sort=False)["예상APT"].sum().div(60).reset_index(name="값")
+        unit = "h"
+    elif metric == "LOT 수":
+        g = df.groupby(keys, sort=False)["LOTID"].nunique().reset_index(name="값")
+        unit = "건"
+    else:
+        g = df.groupby(keys, sort=False)["지정매수"].sum().reset_index(name="값")
+        unit = "매"
+    g["값"] = g["값"].astype(float)
+    return g, unit
+
+
+def wk_label(ts) -> str:
+    return f"{pd.Timestamp(ts):%m/%d}주"
+
+
+def week_list(w: pd.DataFrame) -> list:
+    return sorted(w["주차"].unique())
+
+
+def done_weeks(ws: list) -> list:
+    """끝난 주만 남긴다.
+
+    조회 끝일이 주 중간이면 마지막 주는 아직 쌓이는 중이다. 그 주를 전주와
+    그냥 비교하면 어느 부서든 '감소' 로 보여서 증감이 통째로 거짓말이 된다.
+    """
+    return [x for x in ws if (pd.Timestamp(d_to) - pd.Timestamp(x)).days >= 6]
+
+
+def rank_badge(cur_rank, prev_rank) -> str:
+    if pd.isna(prev_rank):
+        return bd("hv", "신규")
+    d = int(prev_rank) - int(cur_rank)
+    if d > 0:
+        return bd("hv", f"▲{d}")
+    if d < 0:
+        return bd("ok", f"▼{abs(d)}")
+    return bd("lt", "-")
+
+
+def week_controls(parent, kp: str):
+    """기간·지표 선택. 세 화면이 같은 모양이 되게 묶어 둔다."""
+    c1, c2, _ = parent.columns([1.2, 1.7, 2.6])
+    weeks = int(seg(c1, "기간", [f"{n}주" for n in C.WEEK_CHOICES],
+                    f"{kp}_weeks", default=f"{C.WEEKS_DEFAULT}주")[:-1])
+    metric = seg(c2, "지표", ["측정시간", "LOT 수", "매수"], f"{kp}_metric")
+    return weeks, metric
+
+
+# ================================= 주차별 · 부서별 현황
+if PAGE == "주차별 부서별 현황":
+    st.markdown("<div class='sec'>주차별 부서별 Manual 사전 지정 현황</div>",
+                unsafe_allow_html=True)
+    weeks, metric = week_controls(st, "wd")
+    w = week_base(weeks)
+    if w.empty:
         empty_note(st, "Manual 사전 지정 내역이 없습니다.")
     else:
-        wdf["주차"] = wdf["요청일"].dt.to_period("W").dt.start_time
-        key = "PPID" if w_by == "PPID" else "DEPARTMENT"
-        if w_metric == "측정시간":
-            g = wdf.groupby(["주차", key])["예상APT"].sum().div(60).reset_index(name="값")
-            unit = "h"
-        elif w_metric == "LOT 수":
-            g = wdf.groupby(["주차", key])["LOTID"].nunique().reset_index(name="값")
-            unit = "건"
-        else:
-            g = wdf.groupby(["주차", key])["지정매수"].sum().reset_index(name="값")
-            unit = "매"
+        ws = week_list(w)
+        g, unit = week_agg(w, ["주차", "DEPARTMENT"], metric)
+        tot = g.groupby("DEPARTMENT")["값"].sum().sort_values(ascending=False)
+        depts = tot.index.tolist()
+        if st.session_state.get("wd_pick") not in depts:
+            st.session_state["wd_pick"] = depts[0]
+        pick = st.selectbox("강조할 부서", depts, key="wd_pick")
 
-        g["값"] = g["값"].astype(float)      # LOT 수·매수는 정수라 pivot fill_value 와 dtype 이 어긋난다
-        opts = (g.groupby(key)["값"].sum().sort_values(ascending=False).head(12).index.tolist())
-        if st.session_state.get("w_pick") not in opts:
-            st.session_state["w_pick"] = opts[0] if opts else None
-        pick = st.selectbox(f"강조할 {w_by}", opts, key="w_pick")
-
-        g["강조"] = g[key].eq(pick).map({True: "선택", False: "기타"})
-        fig = px.bar(g, x="주차", y="값", color="강조",
-                     color_discrete_map={"선택": C.C1, "기타": C.C2},
-                     category_orders={"강조": ["선택", "기타"]},
-                     custom_data=[key])
-        fig.update_traces(hovertemplate="%{customdata[0]}<br>%{x|%m/%d}주<br>"
-                                        "%{y:,.1f}" + unit + "<extra></extra>")
+        # 선택 부서 vs 나머지 합 — 2색 규칙을 지키면서 비중이 보이게
+        g["구분"] = g["DEPARTMENT"].eq(pick).map({True: pick, False: "그 외 부서"})
+        gg = g.groupby(["주차", "구분"], sort=True)["값"].sum().reset_index()
+        fig = px.bar(gg, x="주차", y="값", color="구분",
+                     color_discrete_map={pick: C.C1, "그 외 부서": C.C2},
+                     category_orders={"구분": [pick, "그 외 부서"]})
         fig.update_xaxes(tickformat="%m/%d")
-        fig.update_yaxes(title_text=f"{w_metric} ({unit})")
-        chart(st, lay(fig, 300, legend=True), "f_wk")
+        fig.update_yaxes(title_text=f"{metric} ({unit})")
+        chart(st, lay(fig, 300, legend=True), "f_wdept")
 
-        pv = g.pivot_table(index=key, columns="주차", values="값", aggfunc="sum",
-                           fill_value=0.0).sort_index(axis=1)
-        if pv.shape[1] >= 2:
-            last, prev = pv.columns[-1], pv.columns[-2]
-            t = pd.DataFrame({w_by: pv.index, "직전주": pv[prev].to_numpy(),
-                              "최근주": pv[last].to_numpy()})
-            t["전주 대비"] = t["최근주"] - t["직전주"]
-            thr_min = C.SURGE_MIN_MIN / (60.0 if w_metric == "측정시간" else 1.0)
+        # 부서 x 주차 행렬 + 전주 대비 + 평균 상회 연속
+        pv = (g.pivot_table(index="DEPARTMENT", columns="주차", values="값",
+                            aggfunc="sum", fill_value=0.0)
+              .reindex(index=depts).reindex(columns=ws).fillna(0.0))
+        avg = pv.mean(axis=0)                      # 그 주 부서 평균
+        over = pv.gt(avg, axis=1)                  # 평균을 넘긴 주
 
-            def _judge(r):
-                if r["직전주"] <= 0 and r["최근주"] > 0:
-                    return "신규"
-                if (r["직전주"] > 0 and r["최근주"] >= r["직전주"] * C.SURGE_RATIO
-                        and r["전주 대비"] >= thr_min):
-                    return "급증"
-                if r["전주 대비"] > 0:
-                    return "증가"
-                return "-"
+        def streak(row) -> int:
+            n = 0
+            for v in reversed(list(row)):
+                if v:
+                    n += 1
+                else:
+                    break
+            return n
 
-            t["판정"] = t.apply(_judge, axis=1)
-            t = t[t["판정"].ne("-")].sort_values("전주 대비", ascending=False).round(1)
-            st.markdown(f"<div class='ct'>최근 주차 증가 항목</div>"
-                        f"<div class='cs'>{dstr(prev)}주 → {dstr(last)}주 · 단위 {unit} · "
-                        f"급증 = 직전주의 {C.SURGE_RATIO}배 이상이고 "
-                        f"{C.SURGE_MIN_MIN}분 이상 증가</div>", unsafe_allow_html=True)
-            if t.empty:
-                empty_note(st, "증가한 항목이 없습니다.")
+        # 증감은 '끝난 주' 끼리만 비교한다. 진행 중인 주를 끼우면 전부 감소로 나온다.
+        dw = done_weeks(ws)
+        cmp_cols = dw[-2:] if len(dw) >= 2 else []
+        cmp_head = (f"{wk_label(cmp_cols[1])} 대 {wk_label(cmp_cols[0])}"
+                    if cmp_cols else "비교 불가")
+        running = [x for x in ws if x not in dw]
+        RUN_TAG = "<br><span style='font-weight:400'>진행중</span>"
+
+        vmax = float(pv.to_numpy().max()) if pv.size else 0.0
+        head = "<th class='lf'>부서</th>"
+        for c in pv.columns:
+            head += f"<th>{esc(wk_label(c))}{RUN_TAG if c in running else ''}</th>"
+        head += (f"<th>증감<br><span style='font-weight:400'>{esc(cmp_head)}</span></th>"
+                 "<th>평균 상회 연속</th>")
+        body = ""
+        for idx, r in pv.iterrows():
+            tds = ""
+            for c, v in r.items():
+                dim = ";opacity:.55" if c in running else ""
+                if v <= 0:
+                    tds += f"<td style='background:#fafbfb;color:#c3cbc8{dim}'>-</td>"
+                else:
+                    bgc, fg = mix(v, vmax)
+                    tds += f"<td style='background:{bgc};color:{fg}{dim}'>{v:,.1f}</td>"
+            if cmp_cols:
+                dlt_v = float(r[cmp_cols[1]] - r[cmp_cols[0]])
+                dcls = "up" if dlt_v > 0 else ("dn" if dlt_v < 0 else "")
+                tds += f"<td class='{dcls}'><b>{dlt_v:+,.1f}</b></td>"
             else:
-                st.dataframe(t.style.format({"직전주": "{:,.1f}", "최근주": "{:,.1f}",
-                                             "전주 대비": "{:+,.1f}"}),
-                             width="stretch", hide_index=True, height=min(420, 40 + 35 * len(t)))
+                tds += "<td>-</td>"
+            stk = streak(over.loc[idx])
+            tds += f"<td>{bd('hv', f'{stk}주') if stk >= 3 else (bd('wt', f'{stk}주') if stk else bd('ok', '0주'))}</td>"
+            body += f"<tr><td class='lf'>{esc(idx)}</td>{tds}</tr>"
+        st.markdown(f"<div class='txw'><table class='mx'><thead><tr>{head}</tr></thead>"
+                    f"<tbody>{body}</tbody></table></div>"
+                    f"<div class='cs' style='margin-top:6px'>단위 {unit}. "
+                    f"<b>평균 상회 연속</b> = 그 주 전체 부서 Manual 평균을 넘긴 주가 "
+                    f"최근부터 연속 몇 주인지. 3주 이상이면 일회성이 아니라 관행이다. "
+                    f"<b>증감</b>은 끝난 주끼리만 비교한다"
+                    f"{' (마지막 칸은 아직 쌓이는 중이라 흐리게 뒀다)' if running else ''}.</div>",
+                    unsafe_allow_html=True)
+        st.download_button("주차별 부서별 엑셀", key="wdxls",
+                           data=xls({"부서x주차": pv.reset_index(), "원본": view(w)}),
+                           file_name=f"week_dept_{d_to:%Y%m%d}_{weeks}w.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+# ================================= 주차별 · PPID · STEP SEQ Worst 10
+elif PAGE == "주차별 PPID·STEP Worst 10":
+    st.markdown("<div class='sec'>주차별 Manual 사전 지정 Worst 10 · PPID · STEP SEQ</div>",
+                unsafe_allow_html=True)
+    weeks, metric = week_controls(st, "wp")
+    w = week_base(weeks)
+    if w.empty:
+        empty_note(st, "Manual 사전 지정 내역이 없습니다.")
+    else:
+        ws = week_list(w)
+        # 기본은 직전 완주. 진행 중인 주를 기본으로 두면 Worst 순위가 왜곡된다.
+        labels = [wk_label(x) for x in ws]
+        dflt = labels[-2] if len(labels) >= 2 else labels[-1]
+        if st.session_state.get("wp_week") not in labels:
+            st.session_state["wp_week"] = dflt
+        sel = st.selectbox("주차", labels, key="wp_week")
+        wk = ws[labels.index(sel)]
+        prev = ws[labels.index(sel) - 1] if labels.index(sel) > 0 else None
+
+        KEYS = ["STEP_SEQ", "STEPID", "PPID"]
+        cur, unit = week_agg(w[w["주차"].eq(wk)], KEYS, metric)
+        cur = cur.sort_values("값", ascending=False).reset_index(drop=True)
+        cur["순위"] = cur.index + 1
+        if prev is not None:
+            pv, _ = week_agg(w[w["주차"].eq(prev)], KEYS, metric)
+            pv = pv.sort_values("값", ascending=False).reset_index(drop=True)
+            pv["전주순위"] = pv.index + 1
+            cur = cur.merge(pv[KEYS + ["전주순위", "값"]].rename(columns={"값": "전주값"}),
+                            on=KEYS, how="left")
+        else:
+            cur["전주순위"] = pd.NA
+            cur["전주값"] = pd.NA
+        top = cur.head(C.WORST_N).copy()
+
+        if top.empty:
+            empty_note(st, "선택한 주에 Manual 사전 지정이 없습니다.")
+        else:
+            top["라벨"] = [f"{r.STEP_SEQ} · {r.STEPID} · {r.PPID}" + "\u2009" * i
+                         for i, r in top.iterrows()]
+            fig = px.bar(top, x="값", y="라벨", orientation="h")
+            fig.update_traces(marker_color=C.C1,
+                              hovertemplate="%{y}<br>%{x:,.1f}" + unit + "<extra></extra>")
+            fig.update_yaxes(autorange="reversed", tickfont=dict(size=10.5))
+            fig.update_xaxes(title_text=f"{metric} ({unit})")
+            chart(st, lay(fig, 30 * len(top) + 70), "f_wppid")
+
+            det = (w[w["주차"].eq(wk)].groupby(KEYS)
+                   .agg(EQP=("EQP_TYPE", "first"), APT=("APT_매", "max"),
+                        LOT=("LOTID", "nunique"), 매수=("지정매수", "sum"))
+                   .reset_index())
+            top = top.merge(det, on=KEYS, how="left")
+            rows = [[f"{int(r['순위'])}", esc(r["STEP_SEQ"]), esc(r["STEPID"]), esc(r["PPID"]),
+                     esc(r["EQP"]), f"{r['APT']:,.1f}", f"{int(r['LOT'])}", f"{int(r['매수'])}",
+                     f"<b>{r['값']:,.1f}</b>",
+                     "-" if pd.isna(r["전주값"]) else f"{r['전주값']:,.1f}",
+                     rank_badge(r["순위"], r["전주순위"])]
+                    for _, r in top.iterrows()]
+            st.markdown(tx_table(rows, ["#", "STEP SEQ", "STEP", "PPID", "EQP", "1매 ST(분)",
+                                        "LOT", "매수", f"{metric}({unit})",
+                                        f"전주({unit})", "순위 변동"]),
+                        unsafe_allow_html=True)
+            st.caption("순위 변동은 전주 순위 대비. ▲는 순위가 올라간 것(= 더 많이 걸었다), "
+                       "신규는 전주에 없던 항목. 순위만 보면 늘 같은 PPID 가 1위라 "
+                       "무엇이 나빠졌는지 안 보인다.")
+
+            # 선택 항목의 주차 추이
+            picks = top["STEP_SEQ"] + " · " + top["STEPID"] + " · " + top["PPID"]
+            plist = picks.tolist()
+            if st.session_state.get("wp_item") not in plist:
+                st.session_state["wp_item"] = plist[0]
+            item = st.selectbox("추이를 볼 항목", plist, key="wp_item")
+            k = top.iloc[plist.index(item)]
+            sub = w[(w["STEP_SEQ"] == k["STEP_SEQ"]) & (w["STEPID"] == k["STEPID"])
+                    & (w["PPID"] == k["PPID"])]
+            tg, _ = week_agg(sub, ["주차"], metric)
+            tg = tg.set_index("주차").reindex(ws, fill_value=0.0).reset_index(names="주차")
+            fig2 = px.bar(tg, x="주차", y="값")
+            fig2.update_traces(marker_color=C.C1)
+            fig2.update_xaxes(tickformat="%m/%d")
+            fig2.update_yaxes(title_text=f"{metric} ({unit})")
+            st.markdown(f"<div class='ct'>{esc(item)} · 최근 {weeks}주</div>",
+                        unsafe_allow_html=True)
+            chart(st, lay(fig2, 240), "f_wpitem")
+            st.download_button("Worst 10 엑셀", key="wpxls",
+                               data=xls({f"{sel}_Worst": top.drop(columns=["라벨"]),
+                                         "원본": view(w[w["주차"].eq(wk)])}),
+                               file_name=f"week_ppid_{d_to:%Y%m%d}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+# ================================= 주차별 · 요청자 Worst 10
+elif PAGE == "주차별 요청자 Worst 10":
+    st.markdown("<div class='sec'>주차별 Manual 사전 지정 Worst 10 · 요청자</div>",
+                unsafe_allow_html=True)
+    weeks, metric = week_controls(st, "wu")
+    w = week_base(weeks)
+    if w.empty:
+        empty_note(st, "Manual 사전 지정 내역이 없습니다.")
+    else:
+        ws = week_list(w)
+        labels = [wk_label(x) for x in ws]
+        dflt = labels[-2] if len(labels) >= 2 else labels[-1]
+        if st.session_state.get("wu_week") not in labels:
+            st.session_state["wu_week"] = dflt
+        sel = st.selectbox("주차", labels, key="wu_week")
+        wk = ws[labels.index(sel)]
+        prev = ws[labels.index(sel) - 1] if labels.index(sel) > 0 else None
+
+        KEYS = ["요청자", "DEPARTMENT"]
+        cur, unit = week_agg(w[w["주차"].eq(wk)], KEYS, metric)
+        cur = cur.sort_values("값", ascending=False).reset_index(drop=True)
+        cur["순위"] = cur.index + 1
+        if prev is not None:
+            pv, _ = week_agg(w[w["주차"].eq(prev)], KEYS, metric)
+            cur = cur.merge(pv.rename(columns={"값": "전주값"}), on=KEYS, how="left")
+        else:
+            cur["전주값"] = pd.NA
+        top = cur.head(C.WORST_N).copy()
+
+        if top.empty:
+            empty_note(st, "선택한 주에 Manual 사전 지정이 없습니다.")
+        else:
+            top["라벨"] = [f"{r['요청자']} · {r.DEPARTMENT}" + "\u2009" * i
+                         for i, r in top.iterrows()]
+            fig = px.bar(top, x="값", y="라벨", orientation="h")
+            fig.update_traces(marker_color=C.C1,
+                              hovertemplate="%{y}<br>%{x:,.1f}" + unit + "<extra></extra>")
+            fig.update_yaxes(autorange="reversed", tickfont=dict(size=11))
+            fig.update_xaxes(title_text=f"{metric} ({unit})")
+            chart(st, lay(fig, 30 * len(top) + 70), "f_wuser")
+
+            wk_df = w[w["주차"].eq(wk)]
+            det = (wk_df.groupby(KEYS)
+                   .agg(LOT=("LOTID", "nunique"), 건수=("LOTID", "size"),
+                        매수=("지정매수", "sum"),
+                        초과=("예상APT", lambda x: int((x >= THR).sum())))
+                   .reset_index())
+            allw = (w.groupby(KEYS)["예상APT"].sum().div(60) / max(len(ws), 1)).reset_index(name="주평균h")
+            top = top.merge(det, on=KEYS, how="left").merge(allw, on=KEYS, how="left")
+            rows = [[f"{int(r['순위'])}", esc(r["요청자"]), esc(r["DEPARTMENT"]),
+                     f"{int(r['LOT'])}", f"{int(r['건수'])}", f"{int(r['매수'])}",
+                     f"<b>{r['값']:,.1f}</b>",
+                     "-" if pd.isna(r["전주값"]) else f"{r['전주값']:,.1f}",
+                     f"{r['주평균h']:,.1f}",
+                     bd("hv", f"{int(r['초과'])}건") if r["초과"] else bd("ok", "0건")]
+                    for _, r in top.iterrows()]
+            st.markdown(tx_table(rows, ["#", "요청자", "부서", "LOT", "건수", "매수",
+                                        f"{metric}({unit})", f"전주({unit})",
+                                        f"주평균(h)", f"임계 초과({THR:,}분↑)"]),
+                        unsafe_allow_html=True)
+
+            ulist = top["요청자"].tolist()
+            if st.session_state.get("wu_pick") not in ulist:
+                st.session_state["wu_pick"] = ulist[0]
+            who = st.selectbox("STEP·PPID 별로 펼쳐 볼 요청자", ulist, key="wu_pick")
+            sub = (wk_df[wk_df["요청자"].eq(who)]
+                   .groupby(["STEP_SEQ", "STEPID", "PPID", "EQP_TYPE"])
+                   .agg(LOT=("LOTID", "nunique"), 매수=("지정매수", "sum"),
+                        ST=("예상APT", "sum"))
+                   .reset_index().sort_values("ST", ascending=False))
+            st.markdown(f"<div class='ct'>{esc(who)} · {esc(sel)}</div>", unsafe_allow_html=True)
+            if sub.empty:
+                empty_note(st)
+            else:
+                rows = [[esc(r["STEP_SEQ"]), esc(r["STEPID"]), esc(r["PPID"]), esc(r["EQP_TYPE"]),
+                         f"{int(r['LOT'])}", f"{int(r['매수'])}", f"<b>{r['ST']:,.0f}</b>"]
+                        for _, r in sub.iterrows()]
+                st.markdown(tx_table(rows, ["STEP SEQ", "STEP", "PPID", "EQP",
+                                            "LOT", "매수", "총 ST(분)"]),
+                            unsafe_allow_html=True)
+            st.download_button("요청자 Worst 10 엑셀", key="wuxls",
+                               data=xls({f"{sel}_요청자": top.drop(columns=["라벨"]),
+                                         f"{who}_상세": sub}),
+                               file_name=f"week_user_{d_to:%Y%m%d}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.markdown(
+                "<div class='cs' style='margin-top:10px;border-top:1px solid "
+                + C.LINE + ";padding-top:8px'><b>이 표를 읽는 기준.</b> "
+                "요청량이 많은 것과 부적절한 것은 다르다. 공정 변경점이나 설비 PM 이 몰린 "
+                "담당자는 정당하게 상위에 온다. 순위는 <b>어디에 물량이 몰렸는지 찾는 용도</b>이지 "
+                "평가가 아니다. 평가로 쓰이면 사전 지정을 안 걸고 구두로 부탁하는 식으로 "
+                "우회하게 되고, 그러면 이 화면 자체가 쓸모없어진다.</div>",
+                unsafe_allow_html=True)
 
 
 # ==================================================== 기타 분석 · ST TOP 10

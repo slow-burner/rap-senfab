@@ -39,6 +39,34 @@ EQP_ALL = list(EQP_CAPA.keys())
 REASONS = ["Manual", "PM AUTO QUAL", "APC", "DSM"]   # 철자 일치 필수
 MANUAL = "Manual"
 
+# ------------------------------------------------- 실제 DB 값 -> 화면 값 매핑
+# 사내 코드값을 확인한 뒤 이 세 개만 고치면 화면 전체가 따라온다.
+
+AST_UNIT_MIN = 1.0        # AST_TIME 이 '분'이면 1.0, '초'면 1/60. ★단위 확인 필수
+
+# m_lot_actv_req.REQUEST_TYPE -> 사전 지정 사유
+REASON_MAP = {
+    "MANUAL": "Manual",
+    "PM":     "PM AUTO QUAL",
+    "APC":    "APC",
+    "DSM":    "DSM",
+}
+# 모르는 코드는 Manual 로 본다. 관제는 놓치는 것보다 과다 감지가 낫고,
+# 분류 안 된 건이 조용히 빠지면 사전 지정 부하가 과소 집계된다.
+REASON_DEFAULT = "Manual"
+
+# m_lot_actv_req.REQ_STATUS -> 승인상태
+APPROVE_MAP = {"EXECUTE": "승인 완료"}
+APPROVE_DEFAULT = "요청 대기"
+CANCEL_CODES = {"CANCEL", "CANCELLED", "DELETED"}   # 이 값이면 상태를 Cancel 로
+
+CAPA_IS_SAMPLE = True     # 실측 CAPA 를 넣으면 False. 화면의 '예시값' 경고가 사라진다
+
+# ------------------------------------------------------------- 주차별 화면
+WEEK_CHOICES = [4, 8, 12]
+WEEKS_DEFAULT = 12
+WORST_N = 10              # Worst 목록 길이
+
 # ------------------------------------------------------------------- 색
 INK = "#26332f"
 SUB = "#6b7773"
@@ -133,3 +161,19 @@ def need_adjust_mask(df, thr: float, over_eqps) -> "object":
         & df["예상APT"].ge(thr / 4.0)
     )
     return pend & (big | man_over)
+
+
+def classify_reason(request_type) -> str:
+    """REQUEST_TYPE 코드를 화면용 사유 4가지로 바꾼다."""
+    key = str(request_type or "").strip().upper()
+    return REASON_MAP.get(key, REASON_DEFAULT)
+
+
+def classify_approve(req_status) -> str:
+    """REQ_STATUS 코드를 승인 완료 / 요청 대기로 바꾼다."""
+    key = str(req_status or "").strip().upper()
+    return APPROVE_MAP.get(key, APPROVE_DEFAULT)
+
+
+def is_cancel(req_status) -> bool:
+    return str(req_status or "").strip().upper() in CANCEL_CODES
