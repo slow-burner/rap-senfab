@@ -11,6 +11,7 @@
    4. AREA.USER (ILP 406164) → EMP      dscrm_ds.crmadmin_if_zto_employee
    (Spotfire 에 없는 보강)  → STEP_M   fab.m_step  (대기 건의 EQP_TYPE·STEP)
    (Spotfire 에 없는 보강)  → APT_STEP fab.m_lot_spx (PPID 없는 대기 건의 1매 ST)
+   (처음 주신 SQL 에 있던) → WIP      fab.m_wip_current (LOT 의 현재 STEP)
    5. 계산 컬럼 대상 / FORECAST_APT / LINEP → CALC
 
    ※ "Left single match join" 은 여러 건이 맞아도 1건만 붙인다는 뜻이다.
@@ -196,6 +197,44 @@ EMP AS (
 ),
 
 /* ---------------------------------------------------------------------------
+   [현재 재공] fab.m_wip_current — LOT 이 지금 어느 STEP 에 있나
+
+   처음 주신 SQL 에 있던 조인이다(Spotfire 조인 목록에는 없다).
+   ACTV_STEP_SEQ 는 '사전 지정을 건 계측 STEP', W.STEP_SEQ 는 'LOT 이 지금
+   있는 STEP' 이다. 둘을 같이 봐야 그 사전 지정이 코앞인지 한참 뒤인지 안다.
+   WIP 에 없으면(출하·폐기 등) 대기 현황으로 세면 안 되므로 계측유무 판정에도 쓴다.
+
+   LINE_ID + LOT_ID + PROCESS_ID 로 묶는다. LOT 당 1행이 아니면 결과가 불어나
+   FORECAST 합계가 과대 집계되므로 1행으로 줄여 둔다.
+   --------------------------------------------------------------------------- */
+WIP_RANKED AS (
+    SELECT
+        WC.LINE_ID,
+        WC.LOT_ID,
+        WC.PROCESS_ID,
+        WC.STEP_SEQ      AS CUR_STEP_SEQ,
+        WC.STEP_DESC     AS CUR_STEP_DESC,
+        WC.EQP_TYPE      AS CUR_EQP_TYPE,
+        WC.BAY_NAME,
+        WC.LOT_TYPE      AS WIP_LOT_TYPE,
+        WC.WORK_STATUS_SEQ,
+        WC.LOT_STATUS_SEQ,
+        ROW_NUMBER() OVER (
+            PARTITION BY WC.LINE_ID, WC.LOT_ID, WC.PROCESS_ID
+            ORDER BY     WC.LAST_UPDATE_DATE DESC
+        ) AS RN
+    FROM   fab.m_wip_current WC
+    WHERE  WC.LINE_ID    IS NOT NULL
+      AND  WC.LOT_ID     IS NOT NULL
+      AND  WC.PROCESS_ID IS NOT NULL
+),
+WIP AS (
+    SELECT LINE_ID, LOT_ID, PROCESS_ID, CUR_STEP_SEQ, CUR_STEP_DESC, CUR_EQP_TYPE,
+           BAY_NAME, WIP_LOT_TYPE, WORK_STATUS_SEQ, LOT_STATUS_SEQ
+    FROM   WIP_RANKED WHERE RN = 1
+),
+
+/* ---------------------------------------------------------------------------
    [보강] fab.m_step — 사전 지정 STEP 의 설비 유형과 공정 이름
 
    Spotfire 에는 없는 조인이다. 넣는 이유:
@@ -257,7 +296,15 @@ JOINED AS (
         COALESCE(H.EQP_TYPE,  M.EQP_TYPE)  AS EQP_TYPE,
         COALESCE(H.STEP_ID,   M.STEP_ID)   AS STEP_ID,
         COALESCE(H.STEP_DESC, M.STEP_DESC) AS STEP_DESC,
-        H.LOT_TYPE,
+        COALESCE(H.LOT_TYPE, W.WIP_LOT_TYPE) AS LOT_TYPE,
+
+        W.LOT_ID         AS WIP_LOT_ID,     -- NULL 이면 지금 재공에 없는 LOT
+        W.CUR_STEP_SEQ,                     -- LOT 이 지금 있는 STEP
+        W.CUR_STEP_DESC,
+        W.CUR_EQP_TYPE,
+        W.BAY_NAME,
+        W.WORK_STATUS_SEQ,                  -- RUN / HOLD / PRUN / WAIT
+        W.LOT_STATUS_SEQ,
         H.TO_PROCESS_UNIT AS PROCESS_UNIT,   -- Spotfire LINEP 식의 PROCESS_UNIT
 
         A.AVG_APT,
@@ -282,6 +329,10 @@ JOINED AS (
     LEFT JOIN  APT_STEP AS2
            ON  R.PROCESS_ID    = AS2.PROCESS_ID
           AND  R.ACTV_STEP_SEQ = AS2.LOCATION_ID
+    LEFT JOIN  WIP W
+           ON  R.LINE_ID       = W.LINE_ID
+          AND  R.LOT_ID        = W.LOT_ID
+          AND  R.PROCESS_ID    = W.PROCESS_ID
     LEFT JOIN  STEP_M M
            ON  R.LINE_ID       = M.LINE_ID
           AND  R.PROCESS_ID    = M.PROCESS_ID
@@ -355,8 +406,21 @@ CALC AS (
             ELSE J.LINE_ID
         END                                                                    AS LINEP,
 
-        /* 계측유무 — 트랙인 기록 유무. Spotfire 원본과 같은 기준이다. */
-        CASE WHEN J.TKIN_DATE IS NOT NULL THEN 'TKIN 현황' ELSE '대기 현황' END AS 계측유무,
+        /* 계측유무 — 처음 주신 SQL 의 VIEW_TYPE 과 같은 3분기.
+           대기 현황은 '아직 트랙인 안 했고 + 지금 재공에 살아있는' LOT 만이다.
+           재공에서 빠진 LOT(출하·폐기 등)까지 대기로 세면 부하가 부풀려진다. */
+        CASE WHEN J.TKIN_DATE  IS NOT NULL THEN 'TKIN 현황'
+             WHEN J.WIP_LOT_ID IS NOT NULL THEN '대기 현황'
+             ELSE '완료/제외'
+        END                                                                    AS 계측유무,
+
+        /* 사전 지정 STEP 에 도착했나 — 현재 STEP 과 사전 지정 STEP 비교.
+           STEP_SEQ 가 문자열이라 선후(앞인지 뒤인지)는 판단하지 않는다.
+           선후까지 보려면 STEP_SEQ 채번 규칙을 확인한 뒤 비교식을 넣는다. */
+        CASE WHEN J.CUR_STEP_SEQ IS NULL                    THEN '재공 없음'
+             WHEN J.CUR_STEP_SEQ = J.ACTV_STEP_SEQ          THEN '해당 STEP'
+             ELSE '다른 STEP'
+        END                                                                    AS STEP_도달,
 
         /* 측정상태 — TKOUT_DATA 까지 보고 가른다.
            'TKIN 현황' 안에서도 지금 설비에 올라가 있는 건(측정중)과
@@ -377,6 +441,11 @@ SELECT
     측정상태,
     PROCESS_EQP_ID,
     ACTV_STEP_SEQ      AS ACTY_STEP_SEQ,
+    CUR_STEP_SEQ,
+    STEP_도달,
+    CUR_STEP_DESC,
+    BAY_NAME,
+    WORK_STATUS_SEQ,
     PROCESS_ID         AS PROC_ID,
     EQP_TYPE,
     ACTV_SLOT_ID       AS ACTY_SLOT_ID,
@@ -409,8 +478,11 @@ SELECT
     PROCESS_START_DATE,
     LOT_TRANSN_TYPE
 FROM   CALC
-WHERE  계측유무 = 'TKIN 현황'
-  /* 지금 설비에 올라가 있는 건만 보려면 아래 줄의 주석을 푼다 */
+/* 처음 주신 SQL 과 같이 두 표(TKIN 현황 / 대기 현황)에 쓸 데이터를 함께 낸다.
+   한 표만 쓰려면 계측유무로 거르고, 지금 설비에 올라가 있는 건만 보려면
+   측정상태 조건까지 건다. */
+WHERE  계측유무 IN ('TKIN 현황', '대기 현황')
+  -- AND  계측유무 = 'TKIN 현황'
   -- AND  측정상태 = '측정중'
 ORDER BY FORECAST_APT DESC NULLS LAST, TKIN_DATE DESC;
 
